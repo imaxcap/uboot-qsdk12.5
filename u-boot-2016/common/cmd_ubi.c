@@ -41,6 +41,7 @@ struct selected_dev {
 	char part_name[80];
 	int selected;
 	int nr;
+	int partition_added;
 	struct mtd_info *mtd_info;
 };
 
@@ -340,7 +341,7 @@ long long ubi_get_volume_size(char *volume)
 
 int ubi_volume_read(char *volume, char *buf, size_t size)
 {
-	int err, lnum, off, len, tbuf_size;
+	int err = 0, lnum, off, len, tbuf_size;
 	void *tbuf;
 	unsigned long long tmp;
 	struct ubi_volume *vol;
@@ -348,15 +349,15 @@ int ubi_volume_read(char *volume, char *buf, size_t size)
 
 	vol = ubi_find_volume(volume);
 	if (vol == NULL)
-		return ENODEV;
+		return -ENODEV;
 
 	if (vol->updating) {
 		printf("updating");
-		return EBUSY;
+		return -EBUSY;
 	}
 	if (vol->upd_marker) {
 		printf("damaged volume, update marker is set");
-		return EBADF;
+		return -EBADF;
 	}
 	if (offp == vol->used_bytes)
 		return 0;
@@ -377,7 +378,7 @@ int ubi_volume_read(char *volume, char *buf, size_t size)
 	tbuf = malloc_cache_aligned(tbuf_size);
 	if (!tbuf) {
 		printf("NO MEM\n");
-		return ENOMEM;
+		return -ENOMEM;
 	}
 	len = size > tbuf_size ? tbuf_size : size;
 
@@ -390,8 +391,9 @@ int ubi_volume_read(char *volume, char *buf, size_t size)
 
 		err = ubi_eba_read_leb(ubi, vol, lnum, tbuf, off, len, 0);
 		if (err) {
-			printf("read err %x\n", err);
-			err = -err;
+			printf("UBI read failed: volume=%s lnum=%d offset=%d "
+			       "length=%d errno=%d\n",
+			       volume, lnum, off, len, err);
 			break;
 		}
 		off += len;
@@ -414,7 +416,7 @@ int ubi_volume_read(char *volume, char *buf, size_t size)
 }
 
 static int ubi_dev_scan(struct mtd_info *info, char *ubidev,
-		const char *vid_header_offset)
+		const char *vid_header_offset, const char **failed_stage)
 {
 	struct mtd_device *dev;
 	struct part_info *part;
@@ -423,35 +425,62 @@ static int ubi_dev_scan(struct mtd_info *info, char *ubidev,
 	u8 pnum;
 	int err;
 
+	*failed_stage = "partition_lookup";
 	if (find_dev_and_part(ubidev, &dev, &pnum, &part) != 0)
-		return 1;
+		return -ENODEV;
 
 	sprintf(buffer, "mtd=%d", pnum);
 	memset(&mtd_part, 0, sizeof(mtd_part));
 	mtd_part.name = buffer;
 	mtd_part.size = part->size;
 	mtd_part.offset = part->offset;
-	add_mtd_partitions(info, &mtd_part, 1);
+	*failed_stage = "mtd_partition";
+	err = add_mtd_partitions(info, &mtd_part, 1);
+	if (err)
+		return err;
+	ubi_dev.partition_added = 1;
 
 	strcpy(ubi_mtd_param_buffer, buffer);
 	if (vid_header_offset)
 		sprintf(ubi_mtd_param_buffer, "mtd=%d,%s", pnum,
 				vid_header_offset);
+	*failed_stage = "parameter";
 	err = ubi_mtd_param_parse(ubi_mtd_param_buffer, NULL);
-	if (err) {
-		del_mtd_partitions(info);
-		return -err;
-	}
+	if (err)
+		return err;
 
+	*failed_stage = "init";
 	err = ubi_init();
-	if (err) {
-		del_mtd_partitions(info);
-		return -err;
-	}
+	if (err)
+		return err;
 
 	ubi_initialized = 1;
+	*failed_stage = NULL;
 
 	return 0;
+}
+
+/* Fully release command-layer and UBI state before another attach attempt. */
+void ubi_part_detach(void)
+{
+#ifdef CONFIG_CMD_UBIFS
+	if (ubifs_is_mounted())
+		cmd_ubifs_umount();
+#endif
+
+	if (ubi_initialized) {
+		ubi_exit();
+		ubi_initialized = 0;
+	}
+
+	if (ubi_dev.partition_added && ubi_dev.mtd_info)
+		del_mtd_partitions(ubi_dev.mtd_info);
+
+	if (ubi_dev.mtd_info)
+		put_mtd_device(ubi_dev.mtd_info);
+
+	ubi = NULL;
+	memset(&ubi_dev, 0, sizeof(ubi_dev));
 }
 
 int ubi_part(char *part_name, const char *vid_header_offset)
@@ -460,34 +489,16 @@ int ubi_part(char *part_name, const char *vid_header_offset)
 	char mtd_dev[16];
 	struct mtd_device *dev;
 	struct part_info *part;
+	const char *failed_stage = NULL;
 	u8 pnum;
 
+	/* Always start from a clean state, including after a prior failure. */
+	ubi_part_detach();
+
 	if (mtdparts_init() != 0) {
-		printf("Error initializing mtdparts!\n");
-		return 1;
-	}
-
-#ifdef CONFIG_CMD_UBIFS
-	/*
-	 * Automatically unmount UBIFS partition when user
-	 * changes the UBI device. Otherwise the following
-	 * UBIFS commands will crash.
-	 */
-	if (ubifs_is_mounted())
-		cmd_ubifs_umount();
-#endif
-
-	/* todo: get dev number for NAND... */
-	ubi_dev.nr = 0;
-
-	/*
-	 * Call ubi_exit() before re-initializing the UBI subsystem
-	 */
-	if (ubi_initialized) {
-		ubi_exit();
-		del_mtd_partitions(ubi_dev.mtd_info);
-		put_mtd_device(ubi_dev.mtd_info);
-		ubi_initialized = 0;
+		printf("UBI attach failed: partition=%s stage=mtdparts "
+		       "errno=%d\n", part_name, -EINVAL);
+		return -EINVAL;
 	}
 
 	/*
@@ -495,25 +506,30 @@ int ubi_part(char *part_name, const char *vid_header_offset)
 	 * is located
 	 */
 	if (find_dev_and_part(part_name, &dev, &pnum, &part)) {
-		printf("Partition %s not found!\n", part_name);
-		return 1;
+		printf("UBI attach failed: partition=%s "
+		       "stage=partition_lookup errno=%d\n",
+		       part_name, -ENODEV);
+		return -ENODEV;
 	}
 	sprintf(mtd_dev, "%s%d", MTD_DEV_TYPE(dev->id->type), dev->id->num);
 	ubi_dev.mtd_info = get_mtd_device_nm(mtd_dev);
 	if (IS_ERR(ubi_dev.mtd_info)) {
-		printf("Partition %s not found on device %s!\n", part_name,
-		       mtd_dev);
-		return 1;
+		err = PTR_ERR(ubi_dev.mtd_info);
+		ubi_dev.mtd_info = NULL;
+		printf("UBI attach failed: partition=%s device=%s "
+		       "stage=mtd_get errno=%d\n", part_name, mtd_dev, err);
+		return err;
 	}
 
 	ubi_dev.selected = 1;
 
 	strcpy(ubi_dev.part_name, part_name);
 	err = ubi_dev_scan(ubi_dev.mtd_info, ubi_dev.part_name,
-			vid_header_offset);
+			vid_header_offset, &failed_stage);
 	if (err) {
-		printf("UBI init error %d\n", err);
-		ubi_dev.selected = 0;
+		printf("UBI attach failed: partition=%s stage=%s errno=%d\n",
+		       part_name, failed_stage, err);
+		ubi_part_detach();
 		return err;
 	}
 
@@ -533,12 +549,9 @@ static int do_ubi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 
 #ifdef CONFIG_QSPI_LAYOUT_SWITCH
 	if (strcmp(argv[1], "exit") == 0)  {
-		if (ubi_initialized) {
+		if (ubi_initialized || ubi_dev.mtd_info) {
 			printf("!! Detaching UBI partition\n");
-			ubi_exit();
-			del_mtd_partitions(ubi_dev.mtd_info);
-			put_mtd_device(ubi_dev.mtd_info);
-			ubi_initialized = 0;
+			ubi_part_detach();
 		}
 		return 0;
 	}
@@ -678,10 +691,8 @@ static int do_ubi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 			       argv[3], addr);
 
 			err = ubi_volume_read(argv[3], (char *)addr, size);
-			if (err != 0) {
-				ubi_detach_mtd_dev(ubi_dev.nr, 1);
-				put_mtd_device(ubi_dev.mtd_info);
-			}
+			if (err != 0)
+				ubi_part_detach();
 			return err;
 		}
 	}

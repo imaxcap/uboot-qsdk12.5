@@ -278,6 +278,52 @@ static int vtbl_check(const struct ubi_device *ubi,
 	return 0;
 
 bad:
+	switch (err) {
+	case 2:
+		ubi_err(ubi, "record %d has reserved_pebs=0 but is not empty",
+			i);
+		break;
+	case 3:
+		ubi_err(ubi, "record %d has negative field: reserved_pebs=%d "
+			"alignment=%d data_pad=%d name_len=%d", i,
+			reserved_pebs, alignment, data_pad, name_len);
+		break;
+	case 4:
+		ubi_err(ubi, "record %d alignment=%d, expected 1..%d", i,
+			alignment, ubi->leb_size);
+		break;
+	case 5:
+		ubi_err(ubi, "record %d alignment=%d is not aligned to min_io=%d",
+			i, alignment, ubi->min_io_size);
+		break;
+	case 6:
+		ubi_err(ubi, "record %d data_pad=%d, expected=%d", i,
+			data_pad, ubi->leb_size % alignment);
+		break;
+	case 7:
+		ubi_err(ubi, "record %d volume type=%d, expected dynamic=%d or static=%d",
+			i, vol_type, UBI_VID_DYNAMIC, UBI_VID_STATIC);
+		break;
+	case 8:
+		ubi_err(ubi, "record %d update marker=%d, expected 0 or 1",
+			i, upd_marker);
+		break;
+	case 9:
+		ubi_err(ubi, "record %d reserved_pebs=%d exceeds good_pebs=%d",
+			i, reserved_pebs, ubi->good_peb_count);
+		break;
+	case 10:
+		ubi_err(ubi, "record %d name_len=%d exceeds maximum=%d", i,
+			name_len, UBI_VOL_NAME_MAX);
+		break;
+	case 11:
+		ubi_err(ubi, "record %d has an empty volume name", i);
+		break;
+	case 12:
+		ubi_err(ubi, "record %d name_len=%d, actual string length=%zu",
+			i, name_len, strnlen(name, name_len + 1));
+		break;
+	}
 	ubi_err(ubi, "volume table check failed: record %d, error %d", i, err);
 	ubi_dump_vtbl_record(&vtbl[i], i);
 	return -EINVAL;

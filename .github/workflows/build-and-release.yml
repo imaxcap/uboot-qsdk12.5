@@ -4,45 +4,9 @@
 name: 构建并发布
 
 on:
+  # 暂时只允许手动触发，禁用 push 自动构建。
   workflow_dispatch:
     inputs:
-      BUILD_TARGET:
-        description: '设备选择'
-        required: true
-        type: choice
-        options:
-          - all
-          - ipq50xx
-          - ipq53xx
-          - ipq60xx
-          - ipq807x
-          - aliyun_ap8220
-          - cmcc_mr3000d-ci
-          - cmcc_pz-l8
-          - cmcc_rax3000q
-          - cmiot_ax18
-          - cradlepoint_e320
-          - cucc_vs010
-          - glinet_gl-ax1800
-          - inseego_fg2000
-          - jdcloud_ax3000
-          - jdcloud_re-cs-02
-          - jdcloud_re-cs-06
-          - jdcloud_re-cs-07
-          - jdcloud_re-cs-08
-          - jdcloud_re-ss-01
-          - link_nn6000
-          - oceanblue_s200-h
-          - oppo_ckb01
-          - philips_ly1800
-          - qihoo_360v6
-          - redmi_ax5-jdcloud
-          - redmi_ax6
-          - sy_y6010
-          - xiaomi_ax3600
-          - xiaomi_be3600-pro
-          - zn_m2
-        default: 'all'
       PRERELEASE:
         description: '作为预发布版本'
         required: true
@@ -50,7 +14,6 @@ on:
         default: false
 
 env:
-  BUILD_TARGET: ${{ inputs.BUILD_TARGET }}
   PRERELEASE: ${{ inputs.PRERELEASE }}
 
 permissions: write-all
@@ -77,7 +40,7 @@ jobs:
 
       - name: 编译 U-Boot
         run: |
-          . ./build.sh build $BUILD_TARGET
+          . ./build.sh build representative
 
           echo "RELEASE_VERSION=$_RELEASE_VERSION_" >> $GITHUB_ENV
 

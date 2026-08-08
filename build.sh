@@ -1213,6 +1213,10 @@ build_targets() {
             log_echo "编译目标: 所有设备"
             devices=($(get_all_devices))
             ;;
+        "representative")
+            log_echo "编译目标: IPQ60xx/IPQ807x 代表设备"
+            devices=("cmiot_ax18" "aliyun_ap8220")
+            ;;
         *)
             # 检查是否为平台名
             if [ -n "$(get_platform_config "$target" "mbn_version")" ]; then
@@ -1270,6 +1274,11 @@ build_targets() {
 
     # 压缩输出目录（仅在 GitHub Actions 环境下）
     compress_output_directory "$output_dir" "$release_version"
+
+    if [ "$fail_count" -ne 0 ]; then
+        log_echo "错误: ${fail_count} 个设备编译失败"
+        return 1
+    fi
 
     return 0
 }
@@ -1338,6 +1347,7 @@ show_help() {
     echo ""
     echo "编译目标:"
     echo "  all                     编译所有设备"
+    echo "  representative          编译 CMIOT AX18 与 Aliyun AP8220"
     echo "  <平台名>                编译指定平台下的所有设备"
     echo "  <设备名>                编译指定的单个设备"
     echo ""
