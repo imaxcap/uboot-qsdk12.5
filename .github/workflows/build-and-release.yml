@@ -1,26 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 chenxin527
 
-name: 构建并发布
+name: 构建 U-Boot
 
 on:
   # 暂时只允许手动触发，禁用 push 自动构建。
   workflow_dispatch:
-    inputs:
-      PRERELEASE:
-        description: '作为预发布版本'
-        required: true
-        type: boolean
-        default: false
 
-env:
-  PRERELEASE: ${{ inputs.PRERELEASE }}
-
-permissions: write-all
+permissions:
+  contents: read
 
 jobs:
   core:
-    name: 构建并发布
+    name: 构建代表固件
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
@@ -44,10 +36,9 @@ jobs:
 
           echo "RELEASE_VERSION=$_RELEASE_VERSION_" >> $GITHUB_ENV
 
-      - name: 发布 U-Boot
-        uses: softprops/action-gh-release@master
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ env.RELEASE_VERSION }}
-          files: ./bin/${{ env.RELEASE_VERSION }}/*
-          body_path: ./bin/${{ env.RELEASE_VERSION }}/release-${{ env.RELEASE_VERSION }}.md
-          prerelease: ${{ env.PRERELEASE == 'true' }}
+          name: uboot-${{ env.RELEASE_VERSION }}
+          path: ./bin/${{ env.RELEASE_VERSION }}/
+          if-no-files-found: error
