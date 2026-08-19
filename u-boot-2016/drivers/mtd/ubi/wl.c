@@ -171,17 +171,192 @@ static void wl_tree_add(struct ubi_wl_entry *e, struct rb_root *root)
 }
 
 /**
- * wl_tree_destroy - destroy a wear-leveling entry.
+ * ubi_wl_entry_by_pnum - find the wear-leveling entry for a PEB.
  * @ubi: UBI device description object
- * @e: the wear-leveling entry to add
+ * @pnum: physical eraseblock number
  *
- * This function destroys a wear leveling entry and removes
- * the reference from the lookup table.
+ * U-Boot indexes directly into its contiguous entry pool. Linux retains the
+ * original pointer lookup table.
  */
+struct ubi_wl_entry *ubi_wl_entry_by_pnum(struct ubi_device *ubi, int pnum)
+{
+	if (pnum < 0 || pnum >= ubi->peb_count)
+		return NULL;
+
+#ifdef __UBOOT__
+	if (ubi->wl_entry_pool) {
+		struct ubi_wl_entry *e = &ubi->wl_entry_pool[pnum];
+
+		return e->pnum == pnum ? e : NULL;
+	}
+	return NULL;
+#else
+	return ubi->lookuptbl[pnum];
+#endif
+}
+
+/**
+ * ubi_wl_entry_set - register or clear a PEB's wear-leveling entry.
+ * @ubi: UBI device description object
+ * @pnum: physical eraseblock number
+ * @e: entry to register, or NULL to clear it
+ */
+void ubi_wl_entry_set(struct ubi_device *ubi, int pnum,
+		      struct ubi_wl_entry *e)
+{
+	ubi_assert(pnum >= 0 && pnum < ubi->peb_count);
+
+#ifdef __UBOOT__
+	ubi_assert(ubi->wl_entry_pool);
+	if (e) {
+		ubi_assert(e == &ubi->wl_entry_pool[pnum]);
+		ubi_assert(e->pnum == pnum);
+	} else {
+		e = &ubi->wl_entry_pool[pnum];
+		memset(e, 0, sizeof(*e));
+		e->pnum = UBI_UNKNOWN;
+	}
+#else
+	ubi->lookuptbl[pnum] = e;
+#endif
+}
+
+/**
+ * ubi_free_wl_entry - release independently allocated WL entry storage.
+ * @ubi: UBI device description object
+ * @e: entry to release
+ *
+ * Pool entries share one allocation and are released by wl_entries_close().
+ * This helper therefore only releases entries outside U-Boot's pool.
+ */
+void ubi_free_wl_entry(struct ubi_device *ubi, struct ubi_wl_entry *e)
+{
+	if (!e)
+		return;
+
+#ifdef __UBOOT__
+	if (ubi->wl_entry_pool) {
+		unsigned long addr = (unsigned long)e;
+		unsigned long pool_start = (unsigned long)ubi->wl_entry_pool;
+		size_t pool_bytes = (size_t)ubi->peb_count * sizeof(*e);
+
+		if (addr >= pool_start && addr - pool_start < pool_bytes)
+			return;
+	}
+#endif
+	kmem_cache_free(ubi_wl_entry_slab, e);
+}
+
+static int wl_entries_init(struct ubi_device *ubi)
+{
+#ifdef __UBOOT__
+	int pnum;
+	size_t bytes;
+
+	if (ubi->peb_count <= 0 ||
+	    (size_t)ubi->peb_count > SIZE_MAX / sizeof(*ubi->wl_entry_pool))
+		return -EINVAL;
+
+	bytes = (size_t)ubi->peb_count * sizeof(*ubi->wl_entry_pool);
+	ubi->wl_entry_pool = malloc(bytes);
+	if (!ubi->wl_entry_pool)
+		return -ENOMEM;
+
+	memset(ubi->wl_entry_pool, 0, bytes);
+	for (pnum = 0; pnum < ubi->peb_count; pnum++)
+		ubi->wl_entry_pool[pnum].pnum = UBI_UNKNOWN;
+
+	if (ubi_attach_debug_enabled())
+		ubi_msg(ubi, "WL entry pool: entries=%d bytes=%zu lookup_saved=%zu",
+			ubi->peb_count, bytes,
+			(size_t)ubi->peb_count * sizeof(void *));
+#else
+	ubi->lookuptbl = kzalloc(ubi->peb_count * sizeof(void *), GFP_KERNEL);
+	if (!ubi->lookuptbl)
+		return -ENOMEM;
+#endif
+
+	return 0;
+}
+
+static void wl_entries_close(struct ubi_device *ubi)
+{
+#ifdef __UBOOT__
+	free(ubi->wl_entry_pool);
+	ubi->wl_entry_pool = NULL;
+#else
+	kfree(ubi->lookuptbl);
+	ubi->lookuptbl = NULL;
+#endif
+}
+
+static struct ubi_wl_entry *wl_entry_create(struct ubi_device *ubi, int pnum,
+					     int ec)
+{
+	struct ubi_wl_entry *e;
+
+	if (pnum < 0 || pnum >= ubi->peb_count)
+		return ERR_PTR(-EINVAL);
+	if (ubi_wl_entry_by_pnum(ubi, pnum))
+		return ERR_PTR(-EEXIST);
+
+#ifdef __UBOOT__
+	e = &ubi->wl_entry_pool[pnum];
+	memset(e, 0, sizeof(*e));
+#else
+	e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
+	if (!e)
+		return ERR_PTR(-ENOMEM);
+#endif
+
+	e->pnum = pnum;
+	e->ec = ec;
+	ubi_wl_entry_set(ubi, pnum, e);
+	return e;
+}
+
+#if defined(__UBOOT__) && defined(CONFIG_MTD_UBI_FASTMAP)
+static int migrate_fastmap_wl_entries(struct ubi_device *ubi)
+{
+	int i;
+	struct ubi_wl_entry *e, *old;
+
+	if (!ubi->fm)
+		return 0;
+
+	for (i = 0; i < ubi->fm->used_blocks; i++) {
+		old = ubi->fm->e[i];
+		e = wl_entry_create(ubi, old->pnum, old->ec);
+		if (IS_ERR(e))
+			return PTR_ERR(e);
+
+		ubi->fm->e[i] = e;
+		ubi_free_wl_entry(ubi, old);
+	}
+
+	return 0;
+}
+
+static void discard_fastmap_wl_entries(struct ubi_device *ubi)
+{
+	int i;
+
+	if (!ubi->fm)
+		return;
+
+	for (i = 0; i < ubi->fm->used_blocks; i++)
+		ubi_free_wl_entry(ubi, ubi->fm->e[i]);
+	kfree(ubi->fm);
+	ubi->fm = NULL;
+}
+#endif
+
 static void wl_entry_destroy(struct ubi_device *ubi, struct ubi_wl_entry *e)
 {
-	ubi->lookuptbl[e->pnum] = NULL;
-	kmem_cache_free(ubi_wl_entry_slab, e);
+	int pnum = e->pnum;
+
+	ubi_wl_entry_set(ubi, pnum, NULL);
+	ubi_free_wl_entry(ubi, e);
 }
 
 /**
@@ -411,7 +586,7 @@ static int prot_queue_del(struct ubi_device *ubi, int pnum)
 {
 	struct ubi_wl_entry *e;
 
-	e = ubi->lookuptbl[pnum];
+	e = ubi_wl_entry_by_pnum(ubi, pnum);
 	if (!e)
 		return -ENODEV;
 
@@ -604,7 +779,7 @@ static int schedule_erase(struct ubi_device *ubi, struct ubi_wl_entry *e,
 	dbg_wl("schedule erasure of PEB %d, EC %d, torture %d",
 	       e->pnum, e->ec, torture);
 
-	wl_wrk = kmalloc(sizeof(struct ubi_work), GFP_NOFS);
+	wl_wrk = ubi_alloc_work();
 	if (!wl_wrk)
 		return -ENOMEM;
 
@@ -634,7 +809,7 @@ static int do_sync_erase(struct ubi_device *ubi, struct ubi_wl_entry *e,
 
 	dbg_wl("sync erase of PEB %i", e->pnum);
 
-	wl_wrk = kmalloc(sizeof(struct ubi_work), GFP_NOFS);
+	wl_wrk = ubi_alloc_work();
 	if (!wl_wrk)
 		return -ENOMEM;
 
@@ -1006,7 +1181,7 @@ static int ensure_wear_leveling(struct ubi_device *ubi, int nested)
 	ubi->wl_scheduled = 1;
 	spin_unlock(&ubi->wl_lock);
 
-	wrk = kmalloc(sizeof(struct ubi_work), GFP_NOFS);
+	wrk = ubi_alloc_work();
 	if (!wrk) {
 		err = -ENOMEM;
 		goto out_cancel;
@@ -1192,7 +1367,7 @@ int ubi_wl_put_peb(struct ubi_device *ubi, int vol_id, int lnum,
 
 retry:
 	spin_lock(&ubi->wl_lock);
-	e = ubi->lookuptbl[pnum];
+	e = ubi_wl_entry_by_pnum(ubi, pnum);
 	if (e == ubi->move_from) {
 		/*
 		 * User is putting the physical eraseblock which was selected to
@@ -1278,7 +1453,7 @@ int ubi_wl_scrub_peb(struct ubi_device *ubi, int pnum)
 
 retry:
 	spin_lock(&ubi->wl_lock);
-	e = ubi->lookuptbl[pnum];
+	e = ubi_wl_entry_by_pnum(ubi, pnum);
 	if (e == ubi->move_from || in_wl_tree(e, &ubi->scrub) ||
 				   in_wl_tree(e, &ubi->erroneous)) {
 		spin_unlock(&ubi->wl_lock);
@@ -1524,69 +1699,91 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 
 	sprintf(ubi->bgt_name, UBI_BGT_NAME_PATTERN, ubi->ubi_num);
 
-	err = -ENOMEM;
-	ubi->lookuptbl = kzalloc(ubi->peb_count * sizeof(void *), GFP_KERNEL);
-	if (!ubi->lookuptbl) {
-		ubi_err(ubi, "attach stage=wl check=lookup_table_alloc "
+	err = wl_entries_init(ubi);
+	if (err) {
+#ifdef __UBOOT__
+		ubi_attach_dbg(ubi, "attach stage=wl check=entry_pool_alloc errno=%d",
+			err);
+		ubi_attach_dbg(ubi, "entry pool context: peb_count=%d entry_size=%zu",
+			ubi->peb_count, sizeof(struct ubi_wl_entry));
+#else
+		ubi_attach_dbg(ubi, "attach stage=wl check=lookup_table_alloc "
 			"peb_count=%d bytes=%zu errno=%d", ubi->peb_count,
 			(size_t)ubi->peb_count * sizeof(void *), err);
+#endif
 		return err;
 	}
+	ubi_heap_snapshot(ubi, "after_wl_pool");
 
 	for (i = 0; i < UBI_PROT_QUEUE_LEN; i++)
 		INIT_LIST_HEAD(&ubi->pq[i]);
 	ubi->pq_head = 0;
 
+#if defined(__UBOOT__) && defined(CONFIG_MTD_UBI_FASTMAP)
+	err = migrate_fastmap_wl_entries(ubi);
+	if (err) {
+		ubi_attach_dbg(ubi, "attach stage=wl check=fastmap_migrate errno=%d",
+			err);
+		ubi_attach_dbg(ubi, "fastmap context: used_blocks=%d",
+			ubi->fm->used_blocks);
+		goto out_free;
+	}
+#endif
+
 	list_for_each_entry_safe(aeb, tmp, &ai->erase, u.list) {
 		cond_resched();
 
-		e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
-		if (!e) {
-			ubi_err(ubi, "attach stage=wl check=entry_alloc "
+		e = wl_entry_create(ubi, aeb->pnum, aeb->ec);
+		if (IS_ERR(e)) {
+			err = PTR_ERR(e);
+			ubi_attach_dbg(ubi, "attach stage=wl check=entry_create "
 				"list=erase pnum=%d created=%d bytes=%zu errno=%d",
 				aeb->pnum, found_pebs,
 				sizeof(struct ubi_wl_entry), err);
 			goto out_free;
 		}
 
-		e->pnum = aeb->pnum;
-		e->ec = aeb->ec;
-		ubi->lookuptbl[e->pnum] = e;
 		err = schedule_erase(ubi, e, aeb->vol_id, aeb->lnum, 0);
 		if (err) {
-			ubi_err(ubi, "attach stage=wl check=erase_work_alloc "
+			ubi_attach_dbg(ubi, "attach stage=wl check=erase_work_alloc "
 				"pnum=%d created=%d errno=%d", aeb->pnum,
 				found_pebs, err);
 			wl_entry_destroy(ubi, e);
 			goto out_free;
 		}
-		err = -ENOMEM;
-
+		/*
+		 * WL now owns all information needed to erase this PEB.  Keeping
+		 * the attach entry until EBA initialization needlessly duplicates
+		 * per-PEB metadata, which is especially costly on large empty UBI
+		 * partitions.
+		 */
+		list_del(&aeb->u.list);
+		kmem_cache_free(ai->aeb_slab_cache, aeb);
 		found_pebs++;
 	}
 
 	ubi->free_count = 0;
-	list_for_each_entry(aeb, &ai->free, u.list) {
+	list_for_each_entry_safe(aeb, tmp, &ai->free, u.list) {
 		cond_resched();
 
-		e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
-		if (!e) {
-			ubi_err(ubi, "attach stage=wl check=entry_alloc "
+		e = wl_entry_create(ubi, aeb->pnum, aeb->ec);
+		if (IS_ERR(e)) {
+			err = PTR_ERR(e);
+			ubi_attach_dbg(ubi, "attach stage=wl check=entry_create "
 				"list=free pnum=%d created=%d bytes=%zu errno=%d",
 				aeb->pnum, found_pebs,
 				sizeof(struct ubi_wl_entry), err);
 			goto out_free;
 		}
 
-		e->pnum = aeb->pnum;
-		e->ec = aeb->ec;
 		ubi_assert(e->ec >= 0);
 
 		wl_tree_add(e, &ubi->free);
 		ubi->free_count++;
 
-		ubi->lookuptbl[e->pnum] = e;
-
+		/* The WL entry has replaced the temporary attach entry. */
+		list_del(&aeb->u.list);
+		kmem_cache_free(ai->aeb_slab_cache, aeb);
 		found_pebs++;
 	}
 
@@ -1594,19 +1791,16 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 		ubi_rb_for_each_entry(rb2, aeb, &av->root, u.rb) {
 			cond_resched();
 
-			e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
-			if (!e) {
-				ubi_err(ubi, "attach stage=wl check=entry_alloc "
+			e = wl_entry_create(ubi, aeb->pnum, aeb->ec);
+			if (IS_ERR(e)) {
+				err = PTR_ERR(e);
+				ubi_attach_dbg(ubi, "attach stage=wl check=entry_create "
 					"list=volume vol_id=%d pnum=%d created=%d "
 					"bytes=%zu errno=%d", av->vol_id,
 					aeb->pnum, found_pebs,
 					sizeof(struct ubi_wl_entry), err);
 				goto out_free;
 			}
-
-			e->pnum = aeb->pnum;
-			e->ec = aeb->ec;
-			ubi->lookuptbl[e->pnum] = e;
 
 			if (!aeb->scrub) {
 				dbg_wl("add PEB %d EC %d to the used tree",
@@ -1630,7 +1824,7 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 
 		for (i = 0; i < ubi->fm->used_blocks; i++) {
 			e = ubi->fm->e[i];
-			ubi->lookuptbl[e->pnum] = e;
+			ubi_wl_entry_set(ubi, e->pnum, e);
 		}
 	}
 	else
@@ -1646,7 +1840,7 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 			ubi_err(ubi, "%d PEBs are corrupted and not used",
 				ubi->corr_peb_count);
 		err = -ENOSPC;
-		ubi_err(ubi, "attach stage=wl check=reserved_pebs "
+		ubi_attach_dbg(ubi, "attach stage=wl check=reserved_pebs "
 			"available=%d required=%d errno=%d", ubi->avail_pebs,
 			reserved_pebs, err);
 		goto out_free;
@@ -1657,7 +1851,7 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 	/* Schedule wear-leveling if needed */
 	err = ensure_wear_leveling(ubi, 0);
 	if (err) {
-		ubi_err(ubi, "attach stage=wl check=ensure_wear_leveling "
+		ubi_attach_dbg(ubi, "attach stage=wl check=ensure_wear_leveling "
 			"errno=%d", err);
 		goto out_free;
 	}
@@ -1669,7 +1863,10 @@ out_free:
 	tree_destroy(ubi, &ubi->used);
 	tree_destroy(ubi, &ubi->free);
 	tree_destroy(ubi, &ubi->scrub);
-	kfree(ubi->lookuptbl);
+#if defined(__UBOOT__) && defined(CONFIG_MTD_UBI_FASTMAP)
+	discard_fastmap_wl_entries(ubi);
+#endif
+	wl_entries_close(ubi);
 	return err;
 }
 
@@ -1704,7 +1901,7 @@ void ubi_wl_close(struct ubi_device *ubi)
 	tree_destroy(ubi, &ubi->erroneous);
 	tree_destroy(ubi, &ubi->free);
 	tree_destroy(ubi, &ubi->scrub);
-	kfree(ubi->lookuptbl);
+	wl_entries_close(ubi);
 }
 
 /**

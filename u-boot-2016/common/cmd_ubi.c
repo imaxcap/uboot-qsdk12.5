@@ -480,11 +480,16 @@ static int ubi_region_scan(struct mtd_info *info, loff_t offset, loff_t size,
 		return err;
 	ubi_dev.partition_added = 1;
 
+	/*
+	 * ubi_mtd_param_parse() receives the value after "mtd=", not the
+	 * complete option. Passing the prefix makes UBI look for an MTD device
+	 * literally named "mtd=bootipq-ubi".
+	 */
 	snprintf(ubi_mtd_param_buffer, sizeof(ubi_mtd_param_buffer),
-		 "mtd=%s", UBI_REGION_MTD_NAME);
+		 "%s", UBI_REGION_MTD_NAME);
 	if (vid_header_offset)
 		snprintf(ubi_mtd_param_buffer, sizeof(ubi_mtd_param_buffer),
-			 "mtd=%s,%s", UBI_REGION_MTD_NAME,
+			 "%s,%s", UBI_REGION_MTD_NAME,
 			 vid_header_offset);
 
 	*failed_stage = "parameter";

@@ -485,16 +485,18 @@ struct ubi_debug_info {
  * @pq: protection queue (contain physical eraseblocks which are temporarily
  *      protected from the wear-leveling worker)
  * @pq_head: protection queue head
- * @wl_lock: protects the @used, @free, @pq, @pq_head, @lookuptbl, @move_from,
- *	     @move_to, @move_to_put @erase_pending, @wl_scheduled, @works,
- *	     @erroneous, @erroneous_peb_count, @fm_work_scheduled, @fm_pool,
- *	     and @fm_wl_pool fields
+ * @wl_lock: protects the @used, @free, @pq, @pq_head, @lookuptbl,
+ *	     @wl_entry_pool, @move_from, @move_to, @move_to_put @erase_pending,
+ *	     @wl_scheduled, @works, @erroneous, @erroneous_peb_count,
+ *	     @fm_work_scheduled, @fm_pool, and @fm_wl_pool fields
  * @move_mutex: serializes eraseblock moves
  * @work_sem: used to wait for all the scheduled works to finish and prevent
  * new works from being submitted
  * @wl_scheduled: non-zero if the wear-leveling was scheduled
- * @lookuptbl: a table to quickly find a &struct ubi_wl_entry object for any
- *             physical eraseblock
+ * @lookuptbl: Linux table to quickly find a &struct ubi_wl_entry object for
+ *             any physical eraseblock
+ * @wl_entry_pool: U-Boot's PEB-indexed pool of wear-leveling entries; this
+ *                 replaces @lookuptbl and per-entry allocations
  * @move_from: physical eraseblock from where the data is being moved
  * @move_to: physical eraseblock where the data is being moved to
  * @move_to_put: if the "to" PEB was put
@@ -599,7 +601,11 @@ struct ubi_device {
 	struct mutex move_mutex;
 	struct rw_semaphore work_sem;
 	int wl_scheduled;
+#ifdef __UBOOT__
+	struct ubi_wl_entry *wl_entry_pool;
+#else
 	struct ubi_wl_entry **lookuptbl;
+#endif
 	struct ubi_wl_entry *move_from;
 	struct ubi_wl_entry *move_to;
 	int move_to_put;
@@ -785,6 +791,16 @@ struct ubi_work {
 	int anchor;
 };
 
+static inline struct ubi_work *ubi_alloc_work(void)
+{
+#ifdef __UBOOT__
+	/* UBI work items are CPU-only metadata, not DMA buffers. */
+	return malloc(sizeof(struct ubi_work));
+#else
+	return kmalloc(sizeof(struct ubi_work), GFP_NOFS);
+#endif
+}
+
 #include "debug.h"
 
 extern struct kmem_cache *ubi_wl_entry_slab;
@@ -877,6 +893,10 @@ int self_check_eba(struct ubi_device *ubi, struct ubi_attach_info *ai_fastmap,
 		   struct ubi_attach_info *ai_scan);
 
 /* wl.c */
+struct ubi_wl_entry *ubi_wl_entry_by_pnum(struct ubi_device *ubi, int pnum);
+void ubi_wl_entry_set(struct ubi_device *ubi, int pnum,
+		      struct ubi_wl_entry *e);
+void ubi_free_wl_entry(struct ubi_device *ubi, struct ubi_wl_entry *e);
 int ubi_wl_get_peb(struct ubi_device *ubi);
 int ubi_wl_put_peb(struct ubi_device *ubi, int vol_id, int lnum,
 		   int pnum, int torture);

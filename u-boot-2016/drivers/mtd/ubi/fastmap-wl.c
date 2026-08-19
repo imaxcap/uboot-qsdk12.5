@@ -59,7 +59,7 @@ static void return_unused_pool_pebs(struct ubi_device *ubi,
 	struct ubi_wl_entry *e;
 
 	for (i = pool->used; i < pool->size; i++) {
-		e = ubi->lookuptbl[pool->pebs[i]];
+		e = ubi_wl_entry_by_pnum(ubi, pool->pebs[i]);
 		wl_tree_add(e, &ubi->free);
 		ubi->free_count++;
 	}
@@ -217,7 +217,7 @@ again:
 
 	ubi_assert(pool->used < pool->size);
 	ret = pool->pebs[pool->used++];
-	prot_queue_add(ubi, ubi->lookuptbl[ret]);
+	prot_queue_add(ubi, ubi_wl_entry_by_pnum(ubi, ret));
 	spin_unlock(&ubi->wl_lock);
 out:
 	return ret;
@@ -251,7 +251,7 @@ static struct ubi_wl_entry *get_peb_for_wl(struct ubi_device *ubi)
 	}
 
 	pnum = pool->pebs[pool->used++];
-	return ubi->lookuptbl[pnum];
+	return ubi_wl_entry_by_pnum(ubi, pnum);
 }
 
 /**
@@ -270,7 +270,7 @@ int ubi_ensure_anchor_pebs(struct ubi_device *ubi)
 	ubi->wl_scheduled = 1;
 	spin_unlock(&ubi->wl_lock);
 
-	wrk = kmalloc(sizeof(struct ubi_work), GFP_NOFS);
+	wrk = ubi_alloc_work();
 	if (!wrk) {
 		spin_lock(&ubi->wl_lock);
 		ubi->wl_scheduled = 0;
@@ -306,7 +306,7 @@ int ubi_wl_put_fm_peb(struct ubi_device *ubi, struct ubi_wl_entry *fm_e,
 	ubi_assert(pnum < ubi->peb_count);
 
 	spin_lock(&ubi->wl_lock);
-	e = ubi->lookuptbl[pnum];
+	e = ubi_wl_entry_by_pnum(ubi, pnum);
 
 	/* This can happen if we recovered from a fastmap the very
 	 * first time and writing now a new one. In this case the wl system
@@ -315,7 +315,7 @@ int ubi_wl_put_fm_peb(struct ubi_device *ubi, struct ubi_wl_entry *fm_e,
 	if (!e) {
 		e = fm_e;
 		ubi_assert(e->ec >= 0);
-		ubi->lookuptbl[pnum] = e;
+		ubi_wl_entry_set(ubi, pnum, e);
 	}
 
 	spin_unlock(&ubi->wl_lock);
@@ -347,7 +347,7 @@ static void ubi_fastmap_close(struct ubi_device *ubi)
 
 	if (ubi->fm) {
 		for (i = 0; i < ubi->fm->used_blocks; i++)
-			kfree(ubi->fm->e[i]);
+			ubi_free_wl_entry(ubi, ubi->fm->e[i]);
 	}
 	kfree(ubi->fm);
 }

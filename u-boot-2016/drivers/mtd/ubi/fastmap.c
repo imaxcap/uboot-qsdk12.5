@@ -73,7 +73,7 @@ static int self_check_seen(struct ubi_device *ubi, int *seen)
 		return 0;
 
 	for (pnum = 0; pnum < ubi->peb_count; pnum++) {
-		if (!seen[pnum] && ubi->lookuptbl[pnum]) {
+		if (!seen[pnum] && ubi_wl_entry_by_pnum(ubi, pnum)) {
 			ubi_err(ubi, "self-check failed for PEB %d, fastmap didn't see it", pnum);
 			ret = -EINVAL;
 		}
@@ -1055,7 +1055,7 @@ int ubi_scan_fastmap(struct ubi_device *ubi, struct ubi_attach_info *ai,
 		e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
 		if (!e) {
 			while (i--)
-				kfree(fm->e[i]);
+				ubi_free_wl_entry(ubi, fm->e[i]);
 
 			ret = -ENOMEM;
 			goto free_hdr;

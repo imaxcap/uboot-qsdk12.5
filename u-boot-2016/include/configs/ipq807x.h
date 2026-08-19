@@ -143,7 +143,8 @@ extern loff_t board_env_size;
 #define CONFIG_ENV_SIZE			CONFIG_ENV_SIZE_MAX
 #define CONFIG_ENV_RANGE		board_env_range
 #define CONFIG_ENV_SIZE_MAX		(256 << 10) /* 256 KB */
-#define CONFIG_SYS_MALLOC_LEN		(CONFIG_ENV_SIZE_MAX + (1024 << 10))
+/* Leave enough room for full UBI attach metadata on 1 GiB+ NAND. */
+#define CONFIG_SYS_MALLOC_LEN		(CONFIG_ENV_SIZE_MAX + (2 << 20))
 
 #define CONFIG_ENV_IS_IN_NAND		1
 #define CONFIG_FLASH_PROTECT

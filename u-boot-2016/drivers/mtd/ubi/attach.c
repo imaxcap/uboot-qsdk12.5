@@ -1408,6 +1408,16 @@ static void attach_stage_error(struct ubi_device *ubi,
 				"empty=%d",
 				ai->vols_found, ai->bad_peb_count,
 				ai->corr_peb_count, ai->empty_peb_count);
+#ifdef __UBOOT__
+		if (mem_malloc_end > mem_malloc_start &&
+		    mem_malloc_brk >= mem_malloc_start &&
+		    mem_malloc_brk <= mem_malloc_end)
+			ubi_err(ubi, "heap arena: total=%lu brk_used=%lu "
+				"brk_uncommitted=%lu (free chunks excluded)",
+				mem_malloc_end - mem_malloc_start,
+				mem_malloc_brk - mem_malloc_start,
+				mem_malloc_end - mem_malloc_brk);
+#endif
 		return;
 	}
 

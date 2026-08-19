@@ -32,7 +32,8 @@ struct kmem_cache *get_mem(int element_sz)
 {
 	struct kmem_cache *ret;
 
-	ret = memalign(ARCH_DMA_MINALIGN, sizeof(struct kmem_cache));
+	/* Slab descriptors are CPU-only metadata and do not need DMA alignment. */
+	ret = malloc(sizeof(struct kmem_cache));
 	if (!ret)
 		return NULL;
 
@@ -43,5 +44,11 @@ struct kmem_cache *get_mem(int element_sz)
 
 void *kmem_cache_alloc(struct kmem_cache *obj, int flag)
 {
-	return memalign(ARCH_DMA_MINALIGN, obj->sz);
+	/*
+	 * Objects served by the compatibility slab API are CPU-only metadata
+	 * (UBI attach/WL entries and UBIFS inodes in this tree).  Aligning every
+	 * small object to ARCH_DMA_MINALIGN wastes a significant amount of the
+	 * fixed U-Boot malloc arena on large UBI devices.
+	 */
+	return malloc(obj->sz);
 }
