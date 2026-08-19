@@ -39,6 +39,8 @@
 #define CONFIG_SYS_CACHELINE_SIZE   64
 #define CONFIG_SYS_VSNPRINTF
 
+#define CONFIG_CMDLINE_EDITING		/* Command history and editing */
+
 #define CONFIG_SYS_NONCACHED_MEMORY     (1 << 20)
 
 #define CONFIG_IPQ807X_UART
