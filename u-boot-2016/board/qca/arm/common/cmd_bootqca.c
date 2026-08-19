@@ -19,17 +19,19 @@
 #include <errno.h>
 #include <asm/arch-qca-common/scm.h>
 #include <part.h>
-#include <linux/mtd/ubi.h>
+#include <ubi_uboot.h>
 #include <asm/arch-qca-common/smem.h>
 #include <mmc.h>
 #include <part_efi.h>
 #include <fdtdec.h>
+#include <libfdt.h>
 #include "fdt_info.h"
 #include <asm/errno.h>
 #include <asm/arch-qca-common/qca_common.h>
 #include <usb.h>
 #include <elf.h>
 #include <cli.h>
+#include <ipq_api.h>
 
 #define SEC_AUTH_SW_ID 		0x17
 #define ROOTFS_IMAGE_TYPE       0x13
@@ -165,7 +167,7 @@ static int update_bootargs(void *addr)
 /*
  * Set the root device and bootargs for mounting root filesystem.
  */
-static int set_fs_bootargs(int *fs_on_nand)
+static int set_fs_bootargs(void)
 {
 	char *bootargs;
 	unsigned int active_part = 0;
@@ -181,7 +183,7 @@ static int set_fs_bootargs(int *fs_on_nand)
 		    ((sfi->flash_secondary_type == SMEM_BOOT_NAND_FLASH) ||
 			(sfi->flash_secondary_type == SMEM_BOOT_QSPI_NAND_FLASH))) {
 			bootargs = nand_rootfs;
-			*fs_on_nand = 1;
+			ipq_fs_on_nand = 1;
 
 			if (sfi->rootfs.offset == 0xBAD0FF5E) {
 				if(smem_bootconfig_info() == 0)
@@ -192,7 +194,7 @@ static int set_fs_bootargs(int *fs_on_nand)
 			}
 
 			fdt_setprop((void *)gd->fdt_blob, 0, "nor_nand_available",
-				    fs_on_nand, sizeof(int));
+				    &ipq_fs_on_nand, sizeof(ipq_fs_on_nand));
 			snprintf(mtdids, sizeof(mtdids),
 				 "nand%d=nand%d,nand%d=" QCA_SPI_NOR_DEVICE,
 				 is_spi_nand_available(),
@@ -225,7 +227,7 @@ static int set_fs_bootargs(int *fs_on_nand)
 			if (ret)
 				return ret;
 
-			*fs_on_nand = 0;
+			ipq_fs_on_nand = 0;
 
 			snprintf(mtdids, sizeof(mtdids), "nand%d="
 				QCA_SPI_NOR_DEVICE, CONFIG_SPI_FLASH_INFO_IDX);
@@ -238,7 +240,7 @@ static int set_fs_bootargs(int *fs_on_nand)
 		bootargs = nand_rootfs;
 		if (getenv("fsbootargs") == NULL)
 			setenv("fsbootargs", bootargs);
-		*fs_on_nand = 1;
+		ipq_fs_on_nand = 1;
 
 		snprintf(mtdids, sizeof(mtdids), "nand0=nand0");
 
@@ -263,7 +265,7 @@ static int set_fs_bootargs(int *fs_on_nand)
 		if (ret)
 			return ret;
 
-		*fs_on_nand = 0;
+		ipq_fs_on_nand = 0;
 		if (getenv("fsbootargs") == NULL)
 			setenv("fsbootargs", bootargs);
 #endif
@@ -271,11 +273,11 @@ static int set_fs_bootargs(int *fs_on_nand)
 		printf("bootipq: unsupported boot flash type\n");
 		return -EINVAL;
 	}
-
 	return 0;
 }
 
-int config_select(unsigned int addr, char *rcmd, int rcmd_size)
+static int config_select_internal(unsigned int addr, char *rcmd,
+		int rcmd_size, int update_args)
 {
 	/* Selecting a config name from the list of available
 	 * config names by passing them to the fit_conf_get_node()
@@ -294,9 +296,11 @@ int config_select(unsigned int addr, char *rcmd, int rcmd_size)
 		printf("Manual device tree config selected!\n");
 		strlcpy(dtb_config_name, config, sizeof(dtb_config_name));
 		if (fit_conf_get_node((void *)addr, dtb_config_name) >= 0) {
-			ret = update_bootargs((void *)addr);
-			if (ret)
-				goto fail;
+			if (update_args) {
+				ret = update_bootargs((void *)addr);
+				if (ret)
+					goto fail;
+			}
 			snprintf(rcmd, rcmd_size, "0x%x#%s",
 				 addr, dtb_config_name);
 			return 0;
@@ -335,9 +339,11 @@ int config_select(unsigned int addr, char *rcmd, int rcmd_size)
 			}
 #endif
 			if (fit_conf_get_node((void *)addr, dtb_config_name) >= 0) {
-				ret = update_bootargs((void *)addr);
-				if (ret)
-					goto fail;
+				if (update_args) {
+					ret = update_bootargs((void *)addr);
+					if (ret)
+						goto fail;
+				}
 				snprintf(rcmd, rcmd_size, "0x%x#%s",
 					 addr, dtb_config_name);
 				return 0;
@@ -350,45 +356,586 @@ fail:
 	return -1;
 }
 
+int config_select(unsigned int addr, char *rcmd, int rcmd_size)
+{
+	return config_select_internal(addr, rcmd, rcmd_size, 1);
+}
+
 __weak int switch_ce_channel_buf(unsigned int channel_id)
 {
 	return 0;
 }
 
 #ifdef CONFIG_IPQ_ELF_AUTH
-static int parse_elf_image_phdr(image_info *img_info, unsigned int addr)
+static int parse_elf_image_phdr_len(image_info *img_info, unsigned int addr,
+		size_t size, int verbose)
 {
 	Elf32_Ehdr *ehdr; /* Elf header structure pointer */
 	Elf32_Phdr *phdr; /* Program header structure pointer */
+	unsigned int phnum;
 	int i;
 
+	if (size < sizeof(*ehdr))
+		return -EINVAL;
+
 	ehdr = (Elf32_Ehdr *)addr;
-	phdr = (Elf32_Phdr *)(addr + ehdr->e_phoff);
 
 	if (!IS_ELF(*ehdr)) {
-		printf("It is not a elf image \n");
+		if (verbose)
+			printf("It is not a elf image \n");
 		return -EINVAL;
 	}
 
 	if (ehdr->e_type != ET_EXEC) {
-		printf("Not a valid elf image\n");
+		if (verbose)
+			printf("Not a valid elf image\n");
+		return -EINVAL;
+	}
+	phnum = min_t(unsigned int, ehdr->e_phnum, NO_OF_PROGRAM_HDRS);
+	if (ehdr->e_phentsize < sizeof(*phdr) ||
+	    ehdr->e_phoff > size ||
+	    phnum > (size - ehdr->e_phoff) / ehdr->e_phentsize) {
+		if (verbose)
+			printf("ELF program header table is outside image: "
+			       "phoff=0x%x phentsize=0x%x phnum=%u size=0x%zx\n",
+			       ehdr->e_phoff, ehdr->e_phentsize,
+			       ehdr->e_phnum, size);
 		return -EINVAL;
 	}
 
 	/* Load each program header */
-	for (i = 0; i < NO_OF_PROGRAM_HDRS; ++i) {
-		printf("Parsing phdr load addr 0x%x offset 0x%x size 0x%x type 0x%x\n",
-		      phdr->p_paddr, phdr->p_offset, phdr->p_filesz, phdr->p_type);
+	for (i = 0; i < phnum; ++i) {
+		phdr = (Elf32_Phdr *)(addr + ehdr->e_phoff +
+				       (i * ehdr->e_phentsize));
+		if (verbose)
+			printf("Parsing phdr load addr 0x%x offset 0x%x "
+			       "size 0x%x type 0x%x\n", phdr->p_paddr,
+			       phdr->p_offset, phdr->p_filesz, phdr->p_type);
 		if(phdr->p_type == PT_LOAD) {
+			if (phdr->p_offset > (unsigned int)-1 - phdr->p_filesz)
+				return -EINVAL;
 			img_info->img_offset = phdr->p_offset;
 			img_info->img_load_addr = phdr->p_paddr;
 			img_info->img_size =  phdr->p_filesz;
 			return 0;
 		}
-		++phdr;
 	}
 
 	return -EINVAL;
+}
+
+static int parse_elf_image_phdr(image_info *img_info, unsigned int addr)
+{
+	return parse_elf_image_phdr_len(img_info, addr,
+					ELF_HDR_PLUS_PHDR_SIZE, 1);
+}
+#endif
+
+#if (defined(CONFIG_ARCH_IPQ6018) || defined(CONFIG_ARCH_IPQ807x)) && \
+	defined(CONFIG_CMD_UBI) && defined(CONFIG_CMD_NAND)
+
+enum ipq_kernel_source_type {
+	IPQ_KERNEL_UBI,
+	IPQ_KERNEL_RAW_NAND,
+};
+
+struct ipq_kernel_source {
+	enum ipq_kernel_source_type type;
+	const char *partition;
+	const char *volume;
+};
+
+static const struct ipq_kernel_source ipq_kernel_sources[] = {
+	{ IPQ_KERNEL_UBI, "ubi_kernel", "kernel" },
+	{ IPQ_KERNEL_UBI, "rootfs", "kernel" },
+	{ IPQ_KERNEL_RAW_NAND, "kernel", NULL },
+};
+
+#define IPQ_KERNEL_PROBE_SIZE	4096
+
+static const char *ipq_kernel_source_name(const struct ipq_kernel_source *source)
+{
+	return source->type == IPQ_KERNEL_UBI ? "ubi" : "raw-nand";
+}
+
+static int ipq_has_secondary_nand(void)
+{
+	int i;
+
+	if (sfi->flash_type != SMEM_BOOT_SPI_FLASH)
+		return 0;
+	if (sfi->flash_secondary_type == SMEM_BOOT_NAND_FLASH ||
+	    sfi->flash_secondary_type == SMEM_BOOT_QSPI_NAND_FLASH)
+		return 1;
+
+	for (i = 0; i < ARRAY_SIZE(ipq_kernel_sources); i++) {
+		if (smem_part_exists(ipq_kernel_sources[i].partition) &&
+		    get_which_flash_param((char *)ipq_kernel_sources[i].partition))
+			return 1;
+	}
+
+	return 0;
+}
+
+static int ipq_kernel_memory_check(uintptr_t addr, size_t size)
+{
+	if (!size || size > (size_t)(~(uintptr_t)0) - addr) {
+		printf("bootipq: load region check failed addr=0x%lx size=0x%zx "
+		       "check=overflow errno=%d\n", (ulong)addr, size, -EFBIG);
+		return -EFBIG;
+	}
+
+	if (!is_memory_region_available(addr, size)) {
+		printf("bootipq: load region check failed addr=0x%lx size=0x%zx "
+		       "check=reserved_or_out_of_ram errno=%d\n",
+		       (ulong)addr, size, -EFBIG);
+		return -EFBIG;
+	}
+
+	return 0;
+}
+
+static int ipq_resolve_nand_partition(const char *partition,
+		loff_t *offset, size_t *size, int *nand_dev)
+{
+	uint32_t part_offset = 0;
+	uint32_t part_size = 0;
+	int table_entry = 1;
+	int ret;
+
+	ret = getpart_offset_size((char *)partition, &part_offset, &part_size);
+	if (ret) {
+		table_entry = 0;
+		/* Preserve the legacy synthetic rootfs partition calculation. */
+		if (!strcmp(partition, "rootfs") &&
+		    sfi->rootfs.offset != 0xBAD0FF5E &&
+		    sfi->rootfs.size != 0xBAD0FF5E) {
+			if (sfi->rootfs.offset > (uint32_t)-1 ||
+			    sfi->rootfs.size > (uint32_t)-1)
+				return -ERANGE;
+			part_offset = sfi->rootfs.offset;
+			part_size = sfi->rootfs.size;
+		} else {
+			return ret;
+		}
+	}
+
+	if (!part_size)
+		return -EINVAL;
+
+	if (sfi->flash_type == SMEM_BOOT_NAND_FLASH ||
+	    sfi->flash_type == SMEM_BOOT_QSPI_NAND_FLASH) {
+		*nand_dev = CONFIG_NAND_FLASH_INFO_IDX;
+	} else if (ipq_has_secondary_nand()) {
+		if (table_entry && !get_which_flash_param((char *)partition))
+			return -ENODEV;
+		*nand_dev = is_spi_nand_available();
+	} else {
+		return -ENODEV;
+	}
+
+	if (*nand_dev < 0 || *nand_dev >= CONFIG_SYS_MAX_NAND_DEVICE ||
+	    !nand_info[*nand_dev].size)
+		return -ENODEV;
+
+	*offset = part_offset;
+	*size = part_size;
+	if (*offset > nand_info[*nand_dev].size ||
+	    *size > nand_info[*nand_dev].size - *offset) {
+		printf("bootipq: partition=%s device=nand%d offset=0x%llx "
+		       "size=0x%zx device_size=0x%llx check=bounds errno=%d\n",
+		       partition, *nand_dev, *offset, *size,
+		       nand_info[*nand_dev].size, -EINVAL);
+		return -EINVAL;
+	}
+	printf("bootipq: partition=%s device=nand%d offset=0x%llx "
+	       "size=0x%zx\n", partition, *nand_dev, *offset, *size);
+
+	return 0;
+}
+
+static int ipq_image_required_at(unsigned int addr, size_t available,
+		size_t image_offset, size_t *required)
+{
+	int format;
+	size_t image_size;
+
+	if (image_offset > available ||
+	    available - image_offset < sizeof(uint32_t))
+		return -EINVAL;
+
+	format = genimg_get_format((void *)(addr + image_offset));
+	if (format == IMAGE_FORMAT_FIT) {
+		if (available - image_offset < sizeof(struct fdt_header))
+			return -EINVAL;
+		image_size = fdt_totalsize((void *)(addr + image_offset));
+		if (image_size < sizeof(struct fdt_header) ||
+		    image_size > (size_t)-1 - image_offset)
+			return -EINVAL;
+		*required = image_offset + image_size;
+		return 0;
+	}
+
+	if (format == IMAGE_FORMAT_LEGACY) {
+		image_header_t *hdr;
+
+		if (available - image_offset < sizeof(*hdr))
+			return -EINVAL;
+		hdr = (image_header_t *)(addr + image_offset);
+		image_size = image_get_image_size(hdr);
+		if (image_size < sizeof(*hdr) ||
+		    image_size > (size_t)-1 - image_offset)
+			return -EINVAL;
+		*required = image_offset + image_size;
+		return 0;
+	}
+
+	return -ENOEXEC;
+}
+
+static int ipq_image_required_size(unsigned int addr, size_t available,
+		size_t *required)
+{
+	int format;
+
+	if (available >= sizeof(uint32_t)) {
+		format = genimg_get_format((void *)addr);
+		if (format == IMAGE_FORMAT_FIT ||
+		    format == IMAGE_FORMAT_LEGACY)
+			return ipq_image_required_at(addr, available, 0, required);
+	}
+
+	if (available >= sizeof(mbn_header_t) + sizeof(uint32_t)) {
+		format = genimg_get_format((void *)(addr + sizeof(mbn_header_t)));
+		if (format == IMAGE_FORMAT_FIT ||
+		    format == IMAGE_FORMAT_LEGACY)
+			return ipq_image_required_at(addr, available,
+						     sizeof(mbn_header_t),
+						     required);
+	}
+
+#ifdef CONFIG_IPQ_ELF_AUTH
+	{
+		image_info img_info;
+		int ret;
+
+		ret = parse_elf_image_phdr_len(&img_info, addr, available, 0);
+		if (!ret) {
+			if (img_info.img_offset > (size_t)-1 - img_info.img_size)
+				return -EINVAL;
+			*required = img_info.img_offset + img_info.img_size;
+			return 0;
+		}
+	}
+#endif
+
+	return -ENOEXEC;
+}
+
+static int ipq_validate_image_at(unsigned int addr, size_t loaded_size,
+		size_t image_offset, char *runcmd, int runcmd_size,
+		unsigned int *fit_addr)
+{
+	int format;
+	size_t image_size;
+
+	if (image_offset > loaded_size ||
+	    loaded_size - image_offset < sizeof(uint32_t))
+		return -EINVAL;
+
+	format = genimg_get_format((void *)(addr + image_offset));
+	if (format == IMAGE_FORMAT_FIT) {
+		int ret;
+
+		if (loaded_size - image_offset < sizeof(struct fdt_header))
+			return -EINVAL;
+		image_size = fdt_totalsize((void *)(addr + image_offset));
+		if (image_size < sizeof(struct fdt_header) ||
+		    image_size > loaded_size - image_offset) {
+			printf("bootipq: FIT size check failed offset=0x%zx "
+			       "fit_size=0x%zx loaded=0x%zx errno=%d\n",
+			       image_offset, image_size, loaded_size, -EFBIG);
+			return -EFBIG;
+		}
+		ret = fit_check_format((void *)(addr + image_offset), image_size);
+		if (ret)
+			return ret;
+		ret = config_select_internal(addr + image_offset, runcmd,
+					     runcmd_size, 0);
+		if (ret)
+			return -ENOENT;
+		*fit_addr = addr + image_offset;
+		return 0;
+	}
+
+	if (format == IMAGE_FORMAT_LEGACY) {
+		image_header_t *hdr;
+
+		if (loaded_size - image_offset < sizeof(*hdr))
+			return -EINVAL;
+		hdr = (image_header_t *)(addr + image_offset);
+		if (!image_check_magic(hdr) || !image_check_hcrc(hdr))
+			return -EBADMSG;
+		image_size = image_get_image_size(hdr);
+		if (image_size < sizeof(*hdr) ||
+		    image_size > loaded_size - image_offset)
+			return -EFBIG;
+		if (getenv_yesno("verify") != 0 && !image_check_dcrc(hdr))
+			return -EBADMSG;
+		snprintf(runcmd, runcmd_size, "0x%x", addr + image_offset);
+		*fit_addr = 0;
+		return 0;
+	}
+
+	return -ENOEXEC;
+}
+
+static int ipq_prepare_kernel_image(unsigned int addr, size_t loaded_size,
+		char *runcmd, int runcmd_size, unsigned int *fit_addr)
+{
+	int format;
+
+	if (loaded_size >= sizeof(uint32_t)) {
+		format = genimg_get_format((void *)addr);
+		if (format == IMAGE_FORMAT_FIT ||
+		    format == IMAGE_FORMAT_LEGACY)
+			return ipq_validate_image_at(addr, loaded_size, 0, runcmd,
+						     runcmd_size, fit_addr);
+	}
+
+	if (loaded_size >= sizeof(mbn_header_t) + sizeof(uint32_t)) {
+		format = genimg_get_format((void *)(addr + sizeof(mbn_header_t)));
+		if (format == IMAGE_FORMAT_FIT ||
+		    format == IMAGE_FORMAT_LEGACY)
+			return ipq_validate_image_at(addr, loaded_size,
+						     sizeof(mbn_header_t),
+						     runcmd, runcmd_size,
+						     fit_addr);
+	}
+
+#ifdef CONFIG_IPQ_ELF_AUTH
+	{
+		image_info img_info;
+		int ret;
+
+		ret = parse_elf_image_phdr_len(&img_info, addr, loaded_size, 0);
+		if (!ret && img_info.img_offset <= loaded_size &&
+		    img_info.img_size <= loaded_size - img_info.img_offset)
+			return ipq_validate_image_at(addr, loaded_size,
+						     img_info.img_offset,
+						     runcmd, runcmd_size,
+						     fit_addr);
+	}
+#endif
+
+	return -ENOEXEC;
+}
+
+static int ipq_load_ubi_kernel(const struct ipq_kernel_source *source,
+		unsigned int load_addr, size_t *loaded_size,
+		const char **failed_stage)
+{
+	long long volume_size;
+	loff_t offset;
+	size_t part_size;
+	size_t volume_bytes;
+	size_t read_size;
+	size_t required;
+	char mtd_dev[16];
+	int nand_dev;
+	int ret;
+
+	*failed_stage = "partition";
+	ret = ipq_resolve_nand_partition(source->partition, &offset,
+					 &part_size, &nand_dev);
+	if (ret)
+		return ret;
+
+	snprintf(mtd_dev, sizeof(mtd_dev), "nand%d", nand_dev);
+	*failed_stage = "attach";
+	ret = ubi_part_region(source->partition, mtd_dev, offset, part_size,
+			      NULL);
+	if (ret)
+		goto out;
+
+	*failed_stage = "read";
+	volume_size = ubi_get_volume_size((char *)source->volume);
+	if (volume_size < 0) {
+		ret = (int)volume_size;
+		printf("bootipq: UBI volume lookup failed partition=%s "
+		       "volume=%s errno=%d\n", source->partition,
+		       source->volume, ret);
+		goto out;
+	}
+	if (!volume_size || (unsigned long long)volume_size > (size_t)-1) {
+		ret = -EFBIG;
+		printf("bootipq: UBI volume size invalid partition=%s "
+		       "volume=%s size=%lld errno=%d\n", source->partition,
+		       source->volume, volume_size, ret);
+		goto out;
+	}
+	volume_bytes = volume_size;
+
+	read_size = min_t(size_t, volume_bytes, IPQ_KERNEL_PROBE_SIZE);
+	ret = ipq_kernel_memory_check(load_addr, read_size);
+	if (ret)
+		goto out;
+	ret = ubi_volume_read((char *)source->volume, (char *)load_addr,
+			      read_size);
+	if (ret)
+		goto out;
+
+	*failed_stage = "image-format";
+	ret = ipq_image_required_size(load_addr, read_size, &required);
+	if (ret)
+		goto out;
+	if (required > volume_bytes) {
+		ret = -EFBIG;
+		printf("bootipq: UBI image size invalid partition=%s volume=%s "
+		       "image_size=0x%zx volume_size=0x%llx errno=%d\n",
+		       source->partition, source->volume, required,
+		       volume_size, ret);
+		goto out;
+	}
+	ret = ipq_kernel_memory_check(load_addr, required);
+	if (ret)
+		goto out;
+
+	if (required > read_size) {
+		*failed_stage = "read";
+		ret = ubi_volume_read((char *)source->volume, (char *)load_addr,
+				      required);
+		if (ret)
+			goto out;
+	}
+
+	*loaded_size = required;
+
+out:
+	/* Also detach after a successful read followed by format fallback. */
+	ubi_part_detach();
+	return ret;
+}
+
+static int ipq_load_raw_kernel(const struct ipq_kernel_source *source,
+		unsigned int load_addr, size_t *loaded_size,
+		const char **failed_stage)
+{
+	nand_info_t *nand;
+	loff_t offset;
+	size_t part_size;
+	size_t read_size;
+	size_t actual;
+	size_t required;
+	int nand_dev;
+	int ret;
+
+	*failed_stage = "partition";
+	ret = ipq_resolve_nand_partition(source->partition, &offset,
+					 &part_size, &nand_dev);
+	if (ret)
+		return ret;
+
+	nand = &nand_info[nand_dev];
+	read_size = min_t(size_t, part_size, nand->erasesize);
+	ret = ipq_kernel_memory_check(load_addr, read_size);
+	if (ret)
+		return ret;
+
+	*failed_stage = "read";
+	actual = 0;
+	ret = nand_read_skip_bad(nand, offset, &read_size, &actual,
+				 part_size, (u_char *)load_addr);
+	if (ret)
+		return ret;
+
+	*failed_stage = "image-format";
+	ret = ipq_image_required_size(load_addr, read_size, &required);
+	if (ret)
+		return ret;
+	if (required > part_size)
+		return -EFBIG;
+	ret = ipq_kernel_memory_check(load_addr, required);
+	if (ret)
+		return ret;
+
+	if (required > read_size) {
+		read_size = required;
+		actual = 0;
+		*failed_stage = "read";
+		ret = nand_read_skip_bad(nand, offset, &read_size, &actual,
+					 part_size, (u_char *)load_addr);
+		if (ret)
+			return ret;
+	}
+
+	*loaded_size = required;
+	return 0;
+}
+
+/*
+ * Only source discovery, attach/read and structural image checks may advance
+ * to the next entry.  Authentication, bootargs mutation and bootm deliberately
+ * happen after this function returns and therefore can never trigger fallback.
+ */
+static int ipq_load_kernel_sources(unsigned int load_addr, char *runcmd,
+		int runcmd_size, unsigned int *fit_addr)
+{
+	const struct ipq_kernel_source *source;
+	const char *failed_stage;
+	size_t loaded_size;
+	int last_ret = -ENOENT;
+	int ret;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ipq_kernel_sources); i++) {
+		source = &ipq_kernel_sources[i];
+		loaded_size = 0;
+		failed_stage = "partition";
+		printf("bootipq: try source=%s partition=%s",
+		       ipq_kernel_source_name(source), source->partition);
+		if (source->volume)
+			printf(" volume=%s", source->volume);
+		printf("\n");
+
+		if (source->type == IPQ_KERNEL_UBI)
+			ret = ipq_load_ubi_kernel(source, load_addr, &loaded_size,
+						  &failed_stage);
+		else
+			ret = ipq_load_raw_kernel(source, load_addr, &loaded_size,
+						  &failed_stage);
+		if (!ret) {
+			failed_stage = "image-format";
+			ret = ipq_prepare_kernel_image(load_addr, loaded_size,
+						       runcmd, runcmd_size,
+						       fit_addr);
+		}
+		if (ret) {
+			last_ret = ret;
+			printf("bootipq: source=%s partition=%s stage=%s "
+			       "errno=%d action=next\n",
+			       ipq_kernel_source_name(source), source->partition,
+			       failed_stage, ret);
+			continue;
+		}
+
+		printf("bootipq: selected source=%s partition=%s",
+		       ipq_kernel_source_name(source), source->partition);
+		if (source->volume)
+			printf(" volume=%s", source->volume);
+		printf(" size=0x%zx\n", loaded_size);
+		return 0;
+	}
+
+	printf("bootipq: all kernel sources failed last_errno=%d\n", last_ret);
+	return last_ret;
+}
+
+static int ipq_use_nand_kernel_sources(void)
+{
+	return sfi->flash_type == SMEM_BOOT_NAND_FLASH ||
+	       sfi->flash_type == SMEM_BOOT_QSPI_NAND_FLASH ||
+	       ipq_has_secondary_nand();
 }
 #endif
 
@@ -471,11 +1018,13 @@ static int authenticate_rootfs(unsigned int kernel_addr)
 	if (mbn_ptr->image_type != ROOTFS_IMAGE_TYPE &&
 			(mbn_ptr->code_size + mbn_ptr->signature_size +
 			 mbn_ptr->cert_chain_size != mbn_ptr->image_size))
-		return CMD_RET_FAILURE;
+		return -EINVAL;
 
 	/* pack, MBN header + rootfs + certificate */
 	/* copy rootfs from the boot device */
-	copy_rootfs(request, mbn_ptr->code_size);
+	ret = copy_rootfs(request, mbn_ptr->code_size);
+	if (ret)
+		return ret;
 
 	/* copy rootfs MBN header */
 	memcpy((void *)CONFIG_ROOTFS_LOAD_ADDR, (void *)kernel_addr + kernel_imgsize,
@@ -494,10 +1043,7 @@ static int authenticate_rootfs(unsigned int kernel_addr)
 	memset(mbn_ptr,  0,
 		(sizeof(mbn_header_t) + mbn_ptr->signature_size + mbn_ptr->cert_chain_size));
 
-	if (ret)
-		return CMD_RET_FAILURE;
-
-	return CMD_RET_SUCCESS;
+	return ret;
 }
 #else
 
@@ -512,24 +1058,24 @@ static int authenticate_rootfs_elf(unsigned int rootfs_hdr)
 		unsigned long addr;
 	} rootfs_img_info;
 
-	if (parse_elf_image_phdr(&img_info, rootfs_hdr))
-		return CMD_RET_FAILURE;
+	ret = parse_elf_image_phdr(&img_info, rootfs_hdr);
+	if (ret)
+		return ret;
 
 	request = img_info.img_load_addr;
 	memcpy((void*)request, (void*)rootfs_hdr, img_info.img_offset);
 
 	/* copy rootfs from the boot device */
-	copy_rootfs(request + img_info.img_offset, img_info.img_size);
+	ret = copy_rootfs(request + img_info.img_offset, img_info.img_size);
+	if (ret)
+		return ret;
 
 	rootfs_img_info.addr = request;
 	rootfs_img_info.type = SEC_AUTH_SW_ID;
 	rootfs_img_info.size = img_info.img_offset + img_info.img_size;
 	ret = qca_scm_secure_authenticate(&rootfs_img_info, sizeof(rootfs_img_info));
 	memset((void *)rootfs_hdr, 0, img_info.img_offset);
-	if (ret)
-		return CMD_RET_FAILURE;
-
-	return CMD_RET_SUCCESS;
+	return ret;
 }
 #endif
 
@@ -554,7 +1100,8 @@ static int do_boot_signedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const a
 	if (argc == 2 && strncmp(argv[1], "debug", 5) == 0)
 		debug = 1;
 
-	if ((ret = set_fs_bootargs(&ipq_fs_on_nand)))
+	ret = set_fs_bootargs();
+	if (ret)
 		return ret;
 
 	/* check the smem info to see which flash used for booting */
@@ -576,7 +1123,8 @@ static int do_boot_signedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const a
 		return -1;
 	}
 	if (debug) {
-		run_command("printenv bootargs", 0);
+		printf("bootargs=%s\n", getenv("bootargs") ?
+		       getenv("bootargs") : "<unset>");
 		printf("Booting from flash\n");
 	}
 
@@ -592,7 +1140,8 @@ static int do_boot_signedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const a
 	}
 	ret = qca_scm_part_info(&part, sizeof(part));
 	if (ret) {
-		printf(" Partition info authentication failed \n");
+		printf("bootipq: fatal stage=auth target=partition-info "
+		       "errno=%d action=stop\n", ret);
 		BUG();
 	}
 #endif
@@ -741,7 +1290,8 @@ static int do_boot_signedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const a
 	ret = qca_scm_auth_kernel(&kernel_img_info,
 			sizeof(kernel_img_info));
 	if (ret) {
-		printf("Kernel image authentication failed \n");
+		printf("bootipq: fatal stage=auth target=kernel "
+		       "errno=%d action=stop\n", ret);
 		BUG();
 	}
 #ifndef CONFIG_IPQ_ELF_AUTH
@@ -751,16 +1301,20 @@ static int do_boot_signedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const a
 #endif
 	if (getenv("rootfs_auth")) {
 #ifdef CONFIG_IPQ_ELF_AUTH
-		if (authenticate_rootfs_elf(img_info.img_load_addr +
-				img_info.img_size) != CMD_RET_SUCCESS) {
-			printf("Rootfs elf image authentication failed\n");
+		ret = authenticate_rootfs_elf(img_info.img_load_addr +
+					   img_info.img_size);
+		if (ret != CMD_RET_SUCCESS) {
+			printf("bootipq: fatal stage=auth target=rootfs-elf "
+			       "errno=%d action=stop\n", ret);
 			BUG();
 		}
 #else
 		/* Rootfs's header and certificate at end of kernel image, copy from
 		 * there and pack with rootfs image and authenticate rootfs */
-		if (authenticate_rootfs(CONFIG_SYS_LOAD_ADDR) != CMD_RET_SUCCESS) {
-			printf("Rootfs image authentication failed\n");
+		ret = authenticate_rootfs(CONFIG_SYS_LOAD_ADDR);
+		if (ret != CMD_RET_SUCCESS) {
+			printf("bootipq: fatal stage=auth target=rootfs "
+			       "errno=%d action=stop\n", ret);
 			BUG();
 		}
 #endif
@@ -810,6 +1364,10 @@ static int do_boot_unsignedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const
 	int ret;
 	char runcmd[256];
 	char * const arg[1] = {runcmd};
+#if (defined(CONFIG_ARCH_IPQ6018) || defined(CONFIG_ARCH_IPQ807x)) && \
+	defined(CONFIG_CMD_UBI) && defined(CONFIG_CMD_NAND)
+	unsigned int fit_addr = 0;
+#endif
 #ifdef CONFIG_QCA_MMC
 	block_dev_desc_t *blk_dev;
 	disk_partition_t disk_info;
@@ -822,13 +1380,38 @@ static int do_boot_unsignedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const
 	if (argc == 2 && strncmp(argv[1], "debug", 5) == 0)
 		debug = 1;
 
-	if ((ret = set_fs_bootargs(&ipq_fs_on_nand)))
+	ret = set_fs_bootargs();
+	if (ret)
 		return ret;
 
 	if (debug) {
-		run_command("printenv bootargs", 0);
+		printf("bootargs=%s\n", getenv("bootargs") ?
+		       getenv("bootargs") : "<unset>");
 		printf("Booting from flash\n");
 	}
+
+#if (defined(CONFIG_ARCH_IPQ6018) || defined(CONFIG_ARCH_IPQ807x)) && \
+	defined(CONFIG_CMD_UBI) && defined(CONFIG_CMD_NAND)
+	if (ipq_use_nand_kernel_sources()) {
+		ret = ipq_load_kernel_sources(CONFIG_SYS_LOAD_ADDR, runcmd,
+					      sizeof(runcmd), &fit_addr);
+		if (ret)
+			return CMD_RET_FAILURE;
+
+		dcache_enable();
+		setenv("mtdids", mtdids);
+		if (fit_addr)
+			ret = update_bootargs((void *)fit_addr);
+		if (fit_addr && ret) {
+			printf("bootipq: fatal source=selected stage=bootargs "
+			       "errno=%d action=stop\n",
+			       ret < 0 ? ret : -EINVAL);
+			dcache_disable();
+			return CMD_RET_FAILURE;
+		}
+		goto kernel_ready;
+	}
+#endif
 
 	if (((sfi->flash_type == SMEM_BOOT_NAND_FLASH) ||
 			(sfi->flash_type == SMEM_BOOT_QSPI_NAND_FLASH))) {
@@ -954,12 +1537,23 @@ static int do_boot_unsignedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const
 		}
 	}
 
+kernel_ready:
 #ifdef CONFIG_SKIP_RESET
 	if (apps_iscrashed())
 		return 1;
 #endif
 
-	if (ret < 0 || boot_os(1, arg) != CMD_RET_SUCCESS) {
+	if (ret < 0) {
+		printf("bootipq: fatal stage=image-format errno=%d "
+		       "action=stop\n", ret);
+	} else {
+		ret = boot_os(1, arg);
+		if (ret != CMD_RET_SUCCESS)
+			printf("bootipq: fatal stage=bootm errno=%d "
+			       "action=stop\n", ret);
+	}
+
+	if (ret != CMD_RET_SUCCESS) {
 #ifdef CONFIG_USB_XHCI_IPQ
 		ipq_board_usb_init();
 #endif
@@ -982,8 +1576,7 @@ static int do_bootipq(cmd_tbl_t *cmdtp, int flag, int argc, char *const argv[])
 	 * set fdt_high parameter so that u-boot will not load
 	 * dtb above CONFIG_IPQ40XX_FDT_HIGH region.
 	 */
-	if (run_command("setenv fdt_high " MK_STR(CONFIG_IPQ_FDT_HIGH) "\n", 0)
-	    != CMD_RET_SUCCESS) {
+	if (setenv("fdt_high", MK_STR(CONFIG_IPQ_FDT_HIGH))) {
 		return CMD_RET_FAILURE;
 	}
 
@@ -1000,11 +1593,16 @@ static int do_bootipq(cmd_tbl_t *cmdtp, int flag, int argc, char *const argv[])
 	*/
 	if (ret == 0 && buf == 1 && !is_atf_enabled()) {
 		ret = do_boot_signedimg(cmdtp, flag, argc, argv);
-	} else if (ret == 0 || ret == -EOPNOTSUPP)
-#endif
-	{
+	} else if (ret == 0 || ret == -EOPNOTSUPP) {
 		ret = do_boot_unsignedimg(cmdtp, flag, argc, argv);
+	} else {
+		printf("bootipq: fatal stage=secure-state errno=%d action=stop\n",
+		       ret);
+		ret = CMD_RET_FAILURE;
 	}
+#else
+	ret = do_boot_unsignedimg(cmdtp, flag, argc, argv);
+#endif
 
 	if (ret == CMD_RET_FAILURE) {
 #ifdef CONFIG_HTTPD

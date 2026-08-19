@@ -460,6 +460,49 @@ static int ubi_dev_scan(struct mtd_info *info, char *ubidev,
 	return 0;
 }
 
+#define UBI_REGION_MTD_NAME "bootipq-ubi"
+
+static int ubi_region_scan(struct mtd_info *info, loff_t offset, loff_t size,
+		const char *vid_header_offset, const char **failed_stage)
+{
+	struct mtd_partition mtd_part;
+	char ubi_mtd_param_buffer[80];
+	int err;
+
+	memset(&mtd_part, 0, sizeof(mtd_part));
+	mtd_part.name = UBI_REGION_MTD_NAME;
+	mtd_part.offset = offset;
+	mtd_part.size = size;
+
+	*failed_stage = "mtd_partition";
+	err = add_mtd_partitions(info, &mtd_part, 1);
+	if (err)
+		return err;
+	ubi_dev.partition_added = 1;
+
+	snprintf(ubi_mtd_param_buffer, sizeof(ubi_mtd_param_buffer),
+		 "mtd=%s", UBI_REGION_MTD_NAME);
+	if (vid_header_offset)
+		snprintf(ubi_mtd_param_buffer, sizeof(ubi_mtd_param_buffer),
+			 "mtd=%s,%s", UBI_REGION_MTD_NAME,
+			 vid_header_offset);
+
+	*failed_stage = "parameter";
+	err = ubi_mtd_param_parse(ubi_mtd_param_buffer, NULL);
+	if (err)
+		return err;
+
+	*failed_stage = "init";
+	err = ubi_init();
+	if (err)
+		return err;
+
+	ubi_initialized = 1;
+	*failed_stage = NULL;
+
+	return 0;
+}
+
 /* Fully release command-layer and UBI state before another attach attempt. */
 void ubi_part_detach(void)
 {
@@ -611,8 +654,8 @@ int ubi_part_region(const char *part_name, const char *mtd_dev,
 	}
 
 	if (!ubi_dev.mtd_info->erasesize ||
-	    (offset % ubi_dev.mtd_info->erasesize) ||
-	    (size % ubi_dev.mtd_info->erasesize)) {
+	    mtd_mod_by_eb(offset, ubi_dev.mtd_info) ||
+	    mtd_mod_by_eb(size, ubi_dev.mtd_info)) {
 		if (ubi_attach_debug_enabled())
 			printf("UBI attach failed: partition=%s device=%s "
 			       "stage=region_check offset=0x%llx size=0x%llx "
