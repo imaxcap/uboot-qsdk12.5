@@ -1095,8 +1095,8 @@ int ubi_set_rootfs_part(void)
 	uint32_t part_size = 0;
 	uint32_t size_block, start_block;
 	qca_smem_flash_info_t *sfi = &qca_smem_flash_info;
-	char runcmd[256];
-	int i;
+	char mtd_dev[16];
+	int nand_dev;
 
 	if (((sfi->flash_type == SMEM_BOOT_NAND_FLASH) ||
 		(sfi->flash_type == SMEM_BOOT_QSPI_NAND_FLASH))) {
@@ -1118,33 +1118,16 @@ int ubi_set_rootfs_part(void)
 	if (!part_size)
 		return -ENOENT;
 
-	if (ubi) {
-		for (i = 0; i < ubi->vtbl_slots; i++) {
-			if (ubi->volumes[i]) {
-				kfree(ubi->volumes[i]->eba_tbl);
-				kfree(ubi->volumes[i]);
-				ubi->volumes[i] = NULL;
-			}
-		}
-	}
+	/* The command-layer helper owns all UBI and temporary MTD cleanup. */
+	ubi_part_detach();
+	ubi = NULL;
 
-	snprintf(runcmd, sizeof(runcmd),
-		 "nand device %d && "
-		 "setenv mtdids nand%d=nand%d && "
-		 "setenv mtdparts mtdparts=nand%d:0x%x@0x%x(fs),${msmparts} && "
-		 "ubi part fs && ", is_spi_nand_available(),
-		 is_spi_nand_available(),
-		 is_spi_nand_available(),
-		 is_spi_nand_available(),
-		 part_size, offset);
-
-	if (run_command(runcmd, 0) != CMD_RET_SUCCESS)
-		return CMD_RET_FAILURE;
-
-	if (ubi) {
-		kfree(ubi);
-		ubi = NULL;
-	}
+	nand_dev = is_spi_nand_available();
+	snprintf(mtd_dev, sizeof(mtd_dev), "nand%d", nand_dev);
+	ret = ubi_part_region(QCA_ROOT_FS_PART_NAME, mtd_dev, offset,
+			      part_size, NULL);
+	if (ret)
+		return ret;
 
 	ubi = ubi_devices[0];
 	return 0;
@@ -1233,10 +1216,22 @@ void reset_smem_ptable_in_9008_mode(void)
 int do_smeminfo(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 {
 	qca_smem_flash_info_t *sfi = &qca_smem_flash_info;
+	int debug = 0;
 	int i,ret;
 	uint32_t bsize;
+
+	if (argc > 2 ||
+	    (argc == 2 && strcmp(argv[1], "--debug")))
+		return CMD_RET_USAGE;
+	if (argc == 2)
+		debug = 1;
+
 #ifdef IPQ_UBI_VOL_WRITE_SUPPORT
+	ubi_attach_debug_set(debug);
 	ubi_set_rootfs_part();
+	ubi_attach_debug_set(0);
+#else
+	(void)debug;
 #endif
 	if (sfi->flash_density != 0) {
 		printf(
@@ -1311,7 +1306,9 @@ int do_smeminfo(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 }
 
 U_BOOT_CMD(
-	smeminfo,    1,    1,    do_smeminfo,
+	smeminfo,    2,    1,    do_smeminfo,
 	"print SMEM FLASH information",
-	"\n    - print flash details gathered from SMEM\n"
+	"[--debug]\n"
+	"    - print flash details gathered from SMEM\n"
+	"    - --debug also prints UBI attach stage/error/heap diagnostics\n"
 );

@@ -661,12 +661,16 @@ static int io_init(struct ubi_device *ubi, int max_beb_per1024)
 		 * guess we should just pick the largest region. But this is
 		 * not implemented.
 		 */
-		ubi_err(ubi, "multiple regions, not implemented");
+		ubi_attach_dbg(ubi, "multiple erase regions (%d), expected 0",
+			ubi->mtd->numeraseregions);
 		return -EINVAL;
 	}
 
-	if (ubi->vid_hdr_offset < 0)
+	if (ubi->vid_hdr_offset < 0) {
+		ubi_attach_dbg(ubi, "invalid VID header offset %d, expected >= 0",
+			ubi->vid_hdr_offset);
 		return -EINVAL;
+	}
 
 	/*
 	 * Note, in this implementation we support MTD devices with 0x7FFFFFFF
@@ -696,14 +700,20 @@ static int io_init(struct ubi_device *ubi, int max_beb_per1024)
 	 * which allows us to avoid costly division operations.
 	 */
 	if (!is_power_of_2(ubi->min_io_size)) {
-		ubi_err(ubi, "min. I/O unit (%d) is not power of 2",
+		ubi_attach_dbg(ubi, "min. I/O unit (%d) is not power of 2",
 			ubi->min_io_size);
 		return -EINVAL;
 	}
 
-	ubi_assert(ubi->hdrs_min_io_size > 0);
-	ubi_assert(ubi->hdrs_min_io_size <= ubi->min_io_size);
-	ubi_assert(ubi->min_io_size % ubi->hdrs_min_io_size == 0);
+	if (ubi->hdrs_min_io_size <= 0 ||
+	    ubi->hdrs_min_io_size > ubi->min_io_size ||
+	    ubi->min_io_size % ubi->hdrs_min_io_size) {
+		ubi_attach_dbg(ubi, "bad header I/O unit %d for min. I/O unit %d "
+			"(writesize %d, subpage shift %d)",
+			ubi->hdrs_min_io_size, ubi->min_io_size,
+			ubi->mtd->writesize, ubi->mtd->subpage_sft);
+		return -EINVAL;
+	}
 
 	ubi->max_write_size = ubi->mtd->writebufsize;
 	/*
@@ -713,7 +723,7 @@ static int io_init(struct ubi_device *ubi, int max_beb_per1024)
 	if (ubi->max_write_size < ubi->min_io_size ||
 	    ubi->max_write_size % ubi->min_io_size ||
 	    !is_power_of_2(ubi->max_write_size)) {
-		ubi_err(ubi, "bad write buffer size %d for %d min. I/O unit",
+		ubi_attach_dbg(ubi, "bad write buffer size %d for %d min. I/O unit",
 			ubi->max_write_size, ubi->min_io_size);
 		return -EINVAL;
 	}
@@ -750,7 +760,7 @@ static int io_init(struct ubi_device *ubi, int max_beb_per1024)
 
 	/* The shift must be aligned to 32-bit boundary */
 	if (ubi->vid_hdr_shift % 4) {
-		ubi_err(ubi, "unaligned VID header shift %d",
+		ubi_attach_dbg(ubi, "unaligned VID header shift %d",
 			ubi->vid_hdr_shift);
 		return -EINVAL;
 	}
@@ -760,8 +770,12 @@ static int io_init(struct ubi_device *ubi, int max_beb_per1024)
 	    ubi->leb_start < ubi->vid_hdr_offset + UBI_VID_HDR_SIZE ||
 	    ubi->leb_start > ubi->peb_size - UBI_VID_HDR_SIZE ||
 	    ubi->leb_start & (ubi->min_io_size - 1)) {
-		ubi_err(ubi, "bad VID header (%d) or data offsets (%d)",
-			ubi->vid_hdr_offset, ubi->leb_start);
+		ubi_attach_dbg(ubi, "bad offsets: VID %d (minimum %d), data %d "
+			"(minimum %d, maximum %d, alignment %d)",
+			ubi->vid_hdr_offset, UBI_EC_HDR_SIZE, ubi->leb_start,
+			ubi->vid_hdr_offset + UBI_VID_HDR_SIZE,
+			ubi->peb_size - UBI_VID_HDR_SIZE,
+			ubi->min_io_size);
 		return -EINVAL;
 	}
 
@@ -882,8 +896,14 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 	struct ubi_device *ubi;
 	int i, err, ref = 0;
 
-	if (max_beb_per1024 < 0 || max_beb_per1024 > MAX_MTD_UBI_BEB_LIMIT)
+	if (max_beb_per1024 < 0 || max_beb_per1024 > MAX_MTD_UBI_BEB_LIMIT) {
+		if (ubi_attach_debug_enabled())
+			printf("UBI error: attach stage=io_init "
+			       "check=max_beb_per1024 actual=%d range=0..%d "
+			       "errno=%d\n", max_beb_per1024,
+			       MAX_MTD_UBI_BEB_LIMIT, -EINVAL);
 		return -EINVAL;
+	}
 
 	if (!max_beb_per1024)
 		max_beb_per1024 = CONFIG_MTD_UBI_BEB_LIMIT;
@@ -912,8 +932,10 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 	 * no sense to attach emulated MTD devices, so we prohibit this.
 	 */
 	if (mtd->type == MTD_UBIVOLUME) {
-		ubi_err(ubi, "refuse attaching mtd%d - it is already emulated on top of UBI",
-			mtd->index);
+		if (ubi_attach_debug_enabled())
+			printf("UBI error: attach stage=io_init check=mtd_type "
+			       "mtd=%d type=%d (UBI volume) errno=%d\n",
+			       mtd->index, mtd->type, -EINVAL);
 		return -EINVAL;
 	}
 
@@ -928,8 +950,14 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 			return -ENFILE;
 		}
 	} else {
-		if (ubi_num >= UBI_MAX_DEVICES)
+		if (ubi_num < 0 || ubi_num >= UBI_MAX_DEVICES) {
+			if (ubi_attach_debug_enabled())
+				printf("UBI error: attach stage=io_init "
+				       "check=ubi_num actual=%d maximum=%d "
+				       "errno=%d\n", ubi_num,
+				       UBI_MAX_DEVICES - 1, -EINVAL);
 			return -EINVAL;
+		}
 
 		/* Make sure ubi_num is not busy */
 		if (ubi_devices[ubi_num]) {
@@ -988,19 +1016,34 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 	ubi_msg(ubi, "attaching mtd%d", mtd->index);
 
 	err = io_init(ubi, max_beb_per1024);
-	if (err)
+	if (err) {
+		ubi_attach_dbg(ubi, "attach stage=io_init failed, errno=%d", err);
+		if (err == -EINVAL)
+			ubi_attach_dbg(ubi, "io_init context: mtd_size=%llu "
+				"erase=%u write=%u writebuf=%u subpage_shift=%d "
+				"vid_offset=%d",
+				ubi->mtd->size, ubi->mtd->erasesize,
+				ubi->mtd->writesize, ubi->mtd->writebufsize,
+				ubi->mtd->subpage_sft, ubi->vid_hdr_offset);
 		goto out_free;
+	}
 
 	err = -ENOMEM;
 	ubi->peb_buf = vmalloc(ubi->peb_size);
-	if (!ubi->peb_buf)
+	if (!ubi->peb_buf) {
+		ubi_attach_dbg(ubi, "attach stage=scan failed allocating PEB buffer "
+			"size=%d, errno=%d", ubi->peb_size, err);
 		goto out_free;
+	}
 
 #ifdef CONFIG_MTD_UBI_FASTMAP
 	ubi->fm_size = ubi_calc_fm_size(ubi);
 	ubi->fm_buf = vzalloc(ubi->fm_size);
-	if (!ubi->fm_buf)
+	if (!ubi->fm_buf) {
+		ubi_attach_dbg(ubi, "attach stage=scan failed allocating fastmap buffer "
+			"size=%zu, errno=%d", ubi->fm_size, err);
 		goto out_free;
+	}
 #endif
 	err = ubi_attach(ubi, 0);
 	if (err) {
@@ -1071,6 +1114,7 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 #endif
 
 	spin_unlock(&ubi->wl_lock);
+	ubi_heap_snapshot(ubi, "device_attached");
 
 	ubi_devices[ubi_num] = ubi;
 	ubi_notify_all(ubi, UBI_VOLUME_ADDED, NULL);
@@ -1168,8 +1212,14 @@ int ubi_detach_mtd_dev(int ubi_num, int anyway)
 	put_mtd_device(ubi->mtd);
 	vfree(ubi->peb_buf);
 	vfree(ubi->fm_buf);
+	ubi_heap_snapshot(ubi, "detach_complete");
 	ubi_msg(ubi, "mtd%d is detached", ubi->mtd->index);
+	/* put_device() is a no-op in U-Boot, so release the descriptor here. */
+#ifdef __UBOOT__
+	kfree(ubi);
+#else
 	put_device(&ubi->dev);
+#endif
 	return 0;
 }
 

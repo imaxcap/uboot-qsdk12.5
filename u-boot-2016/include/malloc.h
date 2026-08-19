@@ -956,6 +956,19 @@ extern ulong mem_malloc_start;
 extern ulong mem_malloc_end;
 extern ulong mem_malloc_brk;
 
+/* Runtime statistics for U-Boot's fixed dlmalloc arena. */
+struct malloc_runtime_stats {
+	ulong arena_total;
+	ulong committed;
+	ulong max_committed;
+	ulong in_use;
+	ulong free_total;
+	ulong largest_free;
+	ulong uncommitted;
+	unsigned int free_chunk_count;
+};
+
+int malloc_get_runtime_stats(struct malloc_runtime_stats *stats);
 void mem_malloc_init(ulong start, ulong size);
 
 #ifdef __cplusplus

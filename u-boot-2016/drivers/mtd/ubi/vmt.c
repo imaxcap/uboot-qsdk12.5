@@ -634,7 +634,16 @@ void ubi_free_volume(struct ubi_device *ubi, struct ubi_volume *vol)
 
 	ubi->volumes[vol->vol_id] = NULL;
 	cdev_del(&vol->cdev);
+	/*
+	 * U-Boot has no device model reference counting and compiles
+	 * device_unregister() to a no-op.  Release the volume explicitly so
+	 * repeated attach/detach cycles do not leak its EBA table and descriptor.
+	 */
+#ifdef __UBOOT__
+	vol_release(&vol->dev);
+#else
 	device_unregister(&vol->dev);
+#endif
 }
 
 /**

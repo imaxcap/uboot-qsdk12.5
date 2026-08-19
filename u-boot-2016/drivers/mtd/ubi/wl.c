@@ -1526,8 +1526,12 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 
 	err = -ENOMEM;
 	ubi->lookuptbl = kzalloc(ubi->peb_count * sizeof(void *), GFP_KERNEL);
-	if (!ubi->lookuptbl)
+	if (!ubi->lookuptbl) {
+		ubi_err(ubi, "attach stage=wl check=lookup_table_alloc "
+			"peb_count=%d bytes=%zu errno=%d", ubi->peb_count,
+			(size_t)ubi->peb_count * sizeof(void *), err);
 		return err;
+	}
 
 	for (i = 0; i < UBI_PROT_QUEUE_LEN; i++)
 		INIT_LIST_HEAD(&ubi->pq[i]);
@@ -1537,16 +1541,26 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 		cond_resched();
 
 		e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
-		if (!e)
+		if (!e) {
+			ubi_err(ubi, "attach stage=wl check=entry_alloc "
+				"list=erase pnum=%d created=%d bytes=%zu errno=%d",
+				aeb->pnum, found_pebs,
+				sizeof(struct ubi_wl_entry), err);
 			goto out_free;
+		}
 
 		e->pnum = aeb->pnum;
 		e->ec = aeb->ec;
 		ubi->lookuptbl[e->pnum] = e;
-		if (schedule_erase(ubi, e, aeb->vol_id, aeb->lnum, 0)) {
+		err = schedule_erase(ubi, e, aeb->vol_id, aeb->lnum, 0);
+		if (err) {
+			ubi_err(ubi, "attach stage=wl check=erase_work_alloc "
+				"pnum=%d created=%d errno=%d", aeb->pnum,
+				found_pebs, err);
 			wl_entry_destroy(ubi, e);
 			goto out_free;
 		}
+		err = -ENOMEM;
 
 		found_pebs++;
 	}
@@ -1556,8 +1570,13 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 		cond_resched();
 
 		e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
-		if (!e)
+		if (!e) {
+			ubi_err(ubi, "attach stage=wl check=entry_alloc "
+				"list=free pnum=%d created=%d bytes=%zu errno=%d",
+				aeb->pnum, found_pebs,
+				sizeof(struct ubi_wl_entry), err);
 			goto out_free;
+		}
 
 		e->pnum = aeb->pnum;
 		e->ec = aeb->ec;
@@ -1576,8 +1595,14 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 			cond_resched();
 
 			e = kmem_cache_alloc(ubi_wl_entry_slab, GFP_KERNEL);
-			if (!e)
+			if (!e) {
+				ubi_err(ubi, "attach stage=wl check=entry_alloc "
+					"list=volume vol_id=%d pnum=%d created=%d "
+					"bytes=%zu errno=%d", av->vol_id,
+					aeb->pnum, found_pebs,
+					sizeof(struct ubi_wl_entry), err);
 				goto out_free;
+			}
 
 			e->pnum = aeb->pnum;
 			e->ec = aeb->ec;
@@ -1620,6 +1645,10 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 		if (ubi->corr_peb_count)
 			ubi_err(ubi, "%d PEBs are corrupted and not used",
 				ubi->corr_peb_count);
+		err = -ENOSPC;
+		ubi_err(ubi, "attach stage=wl check=reserved_pebs "
+			"available=%d required=%d errno=%d", ubi->avail_pebs,
+			reserved_pebs, err);
 		goto out_free;
 	}
 	ubi->avail_pebs -= reserved_pebs;
@@ -1627,8 +1656,11 @@ int ubi_wl_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 
 	/* Schedule wear-leveling if needed */
 	err = ensure_wear_leveling(ubi, 0);
-	if (err)
+	if (err) {
+		ubi_err(ubi, "attach stage=wl check=ensure_wear_leveling "
+			"errno=%d", err);
 		goto out_free;
+	}
 
 	return 0;
 

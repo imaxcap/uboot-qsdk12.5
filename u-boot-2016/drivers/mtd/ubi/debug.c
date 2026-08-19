@@ -8,10 +8,44 @@
 
 #include <ubi_uboot.h>
 #include "ubi.h"
+#ifdef __UBOOT__
+#include <malloc.h>
+#endif
 #ifndef __UBOOT__
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
 #include <linux/module.h>
+#endif
+
+#ifdef __UBOOT__
+static int ubi_attach_debug;
+
+void ubi_attach_debug_set(int enabled)
+{
+	ubi_attach_debug = !!enabled;
+}
+
+int ubi_attach_debug_enabled(void)
+{
+	return ubi_attach_debug;
+}
+
+void ubi_heap_snapshot(struct ubi_device *ubi, const char *point)
+{
+	struct malloc_runtime_stats stats;
+
+	if (!ubi_attach_debug_enabled())
+		return;
+
+	if (malloc_get_runtime_stats(&stats))
+		return;
+
+	ubi_msg(ubi, "heap point=%s arena=%lu used=%lu free=%lu "
+		"largest=%lu committed=%lu uncommitted=%lu chunks=%u",
+		point, stats.arena_total, stats.in_use, stats.free_total,
+		stats.largest_free, stats.committed, stats.uncommitted,
+		stats.free_chunk_count);
+}
 #endif
 
 /**

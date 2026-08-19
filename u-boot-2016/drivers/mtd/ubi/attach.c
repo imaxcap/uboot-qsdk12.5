@@ -1387,6 +1387,60 @@ out:
 
 #endif
 
+static void attach_stage_error(struct ubi_device *ubi,
+			       const struct ubi_attach_info *ai,
+			       const char *stage, int err)
+{
+	if (!ubi_attach_debug_enabled())
+		return;
+
+	ubi_err(ubi, "attach stage=%s failed, errno=%d", stage, err);
+	ubi_heap_snapshot(ubi, "attach_error");
+
+	if (err == -ENOMEM) {
+		ubi_err(ubi, "ENOMEM context: peb_count=%d peb_size=%d "
+			"aeb_size=%zu wl_entry_size=%zu",
+			ubi->peb_count, ubi->peb_size,
+			sizeof(struct ubi_ainf_peb),
+			sizeof(struct ubi_wl_entry));
+		if (ai)
+			ubi_err(ubi, "attach info: volumes=%d bad=%d corrupted=%d "
+				"empty=%d",
+				ai->vols_found, ai->bad_peb_count,
+				ai->corr_peb_count, ai->empty_peb_count);
+		return;
+	}
+
+	if (err != -EINVAL)
+		return;
+
+	ubi_err(ubi, "EINVAL context: mtd_size=%llu peb_size=%d "
+		"peb_count=%d min_io=%d vid_offset=%d data_offset=%d",
+		ubi->mtd->size, ubi->peb_size, ubi->peb_count,
+		ubi->min_io_size, ubi->vid_hdr_offset, ubi->leb_start);
+	if (ai)
+		ubi_err(ubi, "attach info: volumes=%d highest_vol_id=%d "
+			"bad=%d maybe_bad=%d corrupted=%d empty=%d is_empty=%d",
+			ai->vols_found, ai->highest_vol_id, ai->bad_peb_count,
+			ai->maybe_bad_peb_count, ai->corr_peb_count,
+			ai->empty_peb_count, ai->is_empty);
+}
+
+/* Free volume objects created before the UBI user interface is registered. */
+static void free_attach_volumes(struct ubi_device *ubi)
+{
+	int i;
+
+	for (i = 0; i < ubi->vtbl_slots + UBI_INT_VOL_COUNT; i++) {
+		if (!ubi->volumes[i])
+			continue;
+
+		kfree(ubi->volumes[i]->eba_tbl);
+		kfree(ubi->volumes[i]);
+		ubi->volumes[i] = NULL;
+	}
+}
+
 /**
  * ubi_attach - attach an MTD device.
  * @ubi: UBI device descriptor
@@ -1400,9 +1454,12 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 	int err;
 	struct ubi_attach_info *ai;
 
+	ubi_heap_snapshot(ubi, "attach_begin");
 	ai = alloc_ai();
-	if (!ai)
+	if (!ai) {
+		attach_stage_error(ubi, NULL, "scan", -ENOMEM);
 		return -ENOMEM;
+	}
 
 #ifdef CONFIG_MTD_UBI_FASTMAP
 	/* On small flash devices we disable fastmap in any case. */
@@ -1419,8 +1476,12 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 			if (err != UBI_NO_FASTMAP) {
 				destroy_ai(ai);
 				ai = alloc_ai();
-				if (!ai)
-					return -ENOMEM;
+				if (!ai) {
+					err = -ENOMEM;
+					attach_stage_error(ubi, NULL,
+							   "scan", err);
+					return err;
+				}
 
 				err = scan_all(ubi, ai, 0);
 			} else {
@@ -1431,8 +1492,11 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 #else
 	err = scan_all(ubi, ai, 0);
 #endif
-	if (err)
+	if (err) {
+		attach_stage_error(ubi, ai, "scan", err);
 		goto out_ai;
+	}
+	ubi_heap_snapshot(ubi, "after_scan");
 
 	ubi->bad_peb_count = ai->bad_peb_count;
 	ubi->good_peb_count = ubi->peb_count - ubi->bad_peb_count;
@@ -1442,16 +1506,25 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 	dbg_gen("max. sequence number:       %llu", ai->max_sqnum);
 
 	err = ubi_read_volume_table(ubi, ai);
-	if (err)
+	if (err) {
+		attach_stage_error(ubi, ai, "volume_table", err);
 		goto out_ai;
+	}
+	ubi_heap_snapshot(ubi, "after_volume_table");
 
 	err = ubi_wl_init(ubi, ai);
-	if (err)
+	if (err) {
+		attach_stage_error(ubi, ai, "wl", err);
 		goto out_vtbl;
+	}
+	ubi_heap_snapshot(ubi, "after_wl");
 
 	err = ubi_eba_init(ubi, ai);
-	if (err)
+	if (err) {
+		attach_stage_error(ubi, ai, "eba", err);
 		goto out_wl;
+	}
+	ubi_heap_snapshot(ubi, "after_eba");
 
 #ifdef CONFIG_MTD_UBI_FASTMAP
 	if (ubi->fm && ubi_dbg_chk_fastmap(ubi)) {
@@ -1460,11 +1533,13 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 		scan_ai = alloc_ai();
 		if (!scan_ai) {
 			err = -ENOMEM;
+			attach_stage_error(ubi, NULL, "scan", err);
 			goto out_wl;
 		}
 
 		err = scan_all(ubi, scan_ai, 0);
 		if (err) {
+			attach_stage_error(ubi, scan_ai, "scan", err);
 			destroy_ai(scan_ai);
 			goto out_wl;
 		}
@@ -1472,21 +1547,25 @@ int ubi_attach(struct ubi_device *ubi, int force_scan)
 		err = self_check_eba(ubi, ai, scan_ai);
 		destroy_ai(scan_ai);
 
-		if (err)
+		if (err) {
+			attach_stage_error(ubi, ai, "eba", err);
 			goto out_wl;
+		}
 	}
 #endif
 
 	destroy_ai(ai);
+	ubi_heap_snapshot(ubi, "attach_complete");
 	return 0;
 
 out_wl:
 	ubi_wl_close(ubi);
 out_vtbl:
-	ubi_free_internal_volumes(ubi);
+	free_attach_volumes(ubi);
 	vfree(ubi->vtbl);
 out_ai:
 	destroy_ai(ai);
+	ubi_heap_snapshot(ubi, "attach_failed_cleanup");
 	return err;
 }
 

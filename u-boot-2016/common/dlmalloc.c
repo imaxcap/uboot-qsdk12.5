@@ -3133,6 +3133,61 @@ size_t malloc_usable_size(mem) Void_t* mem;
 
 /* Utility to update current_mallinfo for malloc_stats and mallinfo() */
 
+int malloc_get_runtime_stats(struct malloc_runtime_stats *stats)
+{
+	unsigned long free_bytes = 0;
+	unsigned long largest_bin = 0;
+	unsigned long top_bytes = 0;
+	unsigned long growable_top;
+	int i;
+	mbinptr b;
+	mchunkptr p;
+
+	if (!stats)
+		return -1;
+
+	memset(stats, 0, sizeof(*stats));
+	if (mem_malloc_end <= mem_malloc_start ||
+	    mem_malloc_brk < mem_malloc_start ||
+	    mem_malloc_brk > mem_malloc_end)
+		return -1;
+
+	stats->arena_total = mem_malloc_end - mem_malloc_start;
+	stats->uncommitted = mem_malloc_end - mem_malloc_brk;
+	stats->committed = sbrked_mem;
+	stats->max_committed = max_sbrked_mem;
+
+	if (sbrked_mem && top != initial_top) {
+		top_bytes = chunksize(top);
+		free_bytes = top_bytes;
+		if (top_bytes >= MINSIZE)
+			stats->free_chunk_count = 1;
+	}
+
+	for (i = 1; i < NAV; ++i) {
+		b = bin_at(i);
+		for (p = last(b); p != b; p = p->bk) {
+			unsigned long bytes = chunksize(p);
+
+			free_bytes += bytes;
+			stats->free_chunk_count++;
+			if (bytes > largest_bin)
+				largest_bin = bytes;
+		}
+	}
+
+	stats->in_use = stats->committed >= free_bytes ?
+		stats->committed - free_bytes : 0;
+	stats->free_total = free_bytes + stats->uncommitted;
+
+	/* The top chunk can grow into the not-yet-committed arena tail. */
+	growable_top = top_bytes + stats->uncommitted;
+	stats->largest_free = largest_bin > growable_top ?
+		largest_bin : growable_top;
+
+	return 0;
+}
+
 #ifdef DEBUG
 static void malloc_update_mallinfo()
 {

@@ -277,7 +277,53 @@ static int vtbl_check(const struct ubi_device *ubi,
 
 	return 0;
 
-bad:
+	bad:
+	switch (err) {
+	case 2:
+		ubi_attach_dbg(ubi, "record %d has reserved_pebs=0 but is not empty",
+			i);
+		break;
+	case 3:
+		ubi_attach_dbg(ubi, "record %d has negative field: reserved_pebs=%d "
+			"alignment=%d data_pad=%d name_len=%d", i,
+			reserved_pebs, alignment, data_pad, name_len);
+		break;
+	case 4:
+		ubi_attach_dbg(ubi, "record %d alignment=%d, expected 1..%d", i,
+			alignment, ubi->leb_size);
+		break;
+	case 5:
+		ubi_attach_dbg(ubi, "record %d alignment=%d is not aligned to min_io=%d",
+			i, alignment, ubi->min_io_size);
+		break;
+	case 6:
+		ubi_attach_dbg(ubi, "record %d data_pad=%d, expected=%d", i,
+			data_pad, ubi->leb_size % alignment);
+		break;
+	case 7:
+		ubi_attach_dbg(ubi, "record %d volume type=%d, expected dynamic=%d or static=%d",
+			i, vol_type, UBI_VID_DYNAMIC, UBI_VID_STATIC);
+		break;
+	case 8:
+		ubi_attach_dbg(ubi, "record %d update marker=%d, expected 0 or 1",
+			i, upd_marker);
+		break;
+	case 9:
+		ubi_attach_dbg(ubi, "record %d reserved_pebs=%d exceeds good_pebs=%d",
+			i, reserved_pebs, ubi->good_peb_count);
+		break;
+	case 10:
+		ubi_attach_dbg(ubi, "record %d name_len=%d exceeds maximum=%d", i,
+			name_len, UBI_VOL_NAME_MAX);
+		break;
+	case 11:
+		ubi_attach_dbg(ubi, "record %d has an empty volume name", i);
+		break;
+	case 12:
+		ubi_attach_dbg(ubi, "record %d name_len=%d, actual string length=%zu",
+			i, name_len, strnlen(name, name_len + 1));
+		break;
+	}
 	ubi_err(ubi, "volume table check failed: record %d, error %d", i, err);
 	ubi_dump_vtbl_record(&vtbl[i], i);
 	return -EINVAL;
@@ -408,6 +454,9 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 		leb[aeb->lnum] = vzalloc(ubi->vtbl_size);
 		if (!leb[aeb->lnum]) {
 			err = -ENOMEM;
+			ubi_attach_dbg(ubi, "attach stage=volume_table "
+				"check=layout_copy_alloc copy=%d bytes=%d errno=%d",
+				aeb->lnum, ubi->vtbl_size, err);
 			goto out_free;
 		}
 
@@ -496,8 +545,12 @@ static struct ubi_vtbl_record *create_empty_lvol(struct ubi_device *ubi,
 	struct ubi_vtbl_record *vtbl;
 
 	vtbl = vzalloc(ubi->vtbl_size);
-	if (!vtbl)
+	if (!vtbl) {
+		ubi_attach_dbg(ubi, "attach stage=volume_table "
+			"check=empty_table_alloc bytes=%d errno=%d",
+			ubi->vtbl_size, -ENOMEM);
 		return ERR_PTR(-ENOMEM);
+	}
 
 	for (i = 0; i < ubi->vtbl_slots; i++)
 		memcpy(&vtbl[i], &empty_vtbl_record, UBI_VTBL_RECORD_SIZE);
@@ -540,8 +593,12 @@ static int init_volumes(struct ubi_device *ubi,
 			continue; /* Empty record */
 
 		vol = kzalloc(sizeof(struct ubi_volume), GFP_KERNEL);
-		if (!vol)
+		if (!vol) {
+			ubi_attach_dbg(ubi, "attach stage=volume_table "
+				"check=volume_alloc vol_id=%d bytes=%zu errno=%d",
+				i, sizeof(struct ubi_volume), -ENOMEM);
 			return -ENOMEM;
+		}
 
 		vol->reserved_pebs = be32_to_cpu(vtbl[i].reserved_pebs);
 		vol->alignment = be32_to_cpu(vtbl[i].alignment);
@@ -619,8 +676,12 @@ static int init_volumes(struct ubi_device *ubi,
 
 	/* And add the layout volume */
 	vol = kzalloc(sizeof(struct ubi_volume), GFP_KERNEL);
-	if (!vol)
+	if (!vol) {
+		ubi_attach_dbg(ubi, "attach stage=volume_table "
+			"check=layout_volume_alloc bytes=%zu errno=%d",
+			sizeof(struct ubi_volume), -ENOMEM);
 		return -ENOMEM;
+	}
 
 	vol->reserved_pebs = UBI_LAYOUT_VOLUME_EBS;
 	vol->alignment = UBI_LAYOUT_VOLUME_ALIGN;

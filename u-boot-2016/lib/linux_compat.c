@@ -19,6 +19,9 @@ void *kmalloc(size_t size, int flags)
 	void *p;
 
 	p = memalign(ARCH_DMA_MINALIGN, size);
+	if (!p)
+		return NULL;
+
 	if (flags & __GFP_ZERO)
 		memset(p, 0, size);
 
@@ -30,6 +33,9 @@ struct kmem_cache *get_mem(int element_sz)
 	struct kmem_cache *ret;
 
 	ret = memalign(ARCH_DMA_MINALIGN, sizeof(struct kmem_cache));
+	if (!ret)
+		return NULL;
+
 	ret->sz = element_sz;
 
 	return ret;

@@ -48,6 +48,20 @@ void ubi_dump_vtbl_record(const struct ubi_vtbl_record *r, int idx);
 void ubi_dump_av(const struct ubi_ainf_volume *av);
 void ubi_dump_aeb(const struct ubi_ainf_peb *aeb, int type);
 void ubi_dump_mkvol_req(const struct ubi_mkvol_req *req);
+#ifdef __UBOOT__
+void ubi_attach_debug_set(int enabled);
+int ubi_attach_debug_enabled(void);
+void ubi_heap_snapshot(struct ubi_device *ubi, const char *point);
+#define ubi_attach_dbg(ubi, fmt, ...) do {                              \
+	if (ubi_attach_debug_enabled())                                  \
+		ubi_err(ubi, fmt, ##__VA_ARGS__);                          \
+} while (0)
+#else
+static inline int ubi_attach_debug_enabled(void) { return 1; }
+static inline void ubi_heap_snapshot(struct ubi_device *ubi,
+				     const char *point) { }
+#define ubi_attach_dbg(ubi, fmt, ...) ubi_err(ubi, fmt, ##__VA_ARGS__)
+#endif
 int ubi_self_check_all_ff(struct ubi_device *ubi, int pnum, int offset,
 			  int len);
 int ubi_debugfs_init(void);

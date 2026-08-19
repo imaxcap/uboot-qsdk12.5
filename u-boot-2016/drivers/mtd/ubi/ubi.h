@@ -49,12 +49,25 @@
 					 ubi->ubi_num, ##__VA_ARGS__)
 #endif
 
+/*
+ * U-Boot's pr_warn()/pr_err() are routed through MTDDEBUG() and compile to
+ * nothing unless CONFIG_MTD_DEBUG is enabled.  Errors from UBI attach must
+ * remain visible even in normal production builds, otherwise callers only
+ * see the final errno without the failing stage or check.
+ */
+#ifdef __UBOOT__
+#define ubi_warn(ubi, fmt, ...) printf(UBI_NAME_STR "%d warning: %s: " fmt "\n", \
+					       ubi->ubi_num, __func__, ##__VA_ARGS__)
+#define ubi_err(ubi, fmt, ...) printf(UBI_NAME_STR "%d error: %s: " fmt "\n", \
+					     ubi->ubi_num, __func__, ##__VA_ARGS__)
+#else
 /* UBI warning messages */
 #define ubi_warn(ubi, fmt, ...) pr_warn(UBI_NAME_STR "%d warning: %s: " fmt "\n", \
 					ubi->ubi_num, __func__, ##__VA_ARGS__)
 /* UBI error messages */
 #define ubi_err(ubi, fmt, ...) pr_err(UBI_NAME_STR "%d error: %s: " fmt "\n", \
 				      ubi->ubi_num, __func__, ##__VA_ARGS__)
+#endif
 
 /* Background thread name pattern */
 #define UBI_BGT_NAME_PATTERN "ubi_bgt%dd"

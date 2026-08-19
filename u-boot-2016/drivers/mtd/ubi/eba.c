@@ -1410,6 +1410,10 @@ int ubi_eba_init(struct ubi_device *ubi, struct ubi_attach_info *ai)
 				       GFP_KERNEL);
 		if (!vol->eba_tbl) {
 			err = -ENOMEM;
+			ubi_attach_dbg(ubi, "attach stage=eba check=map_alloc "
+				"vol_id=%d reserved_pebs=%d bytes=%zu errno=%d",
+				vol->vol_id, vol->reserved_pebs,
+				(size_t)vol->reserved_pebs * sizeof(int), err);
 			goto out_free;
 		}
 
