@@ -1537,7 +1537,10 @@ static int do_boot_unsignedimg(cmd_tbl_t *cmdtp, int flag, int argc, char *const
 		}
 	}
 
+#if (defined(CONFIG_ARCH_IPQ6018) || defined(CONFIG_ARCH_IPQ807x)) && \
+	defined(CONFIG_CMD_UBI) && defined(CONFIG_CMD_NAND)
 kernel_ready:
+#endif
 #ifdef CONFIG_SKIP_RESET
 	if (apps_iscrashed())
 		return 1;

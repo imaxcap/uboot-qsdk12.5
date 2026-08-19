@@ -705,10 +705,12 @@ flash_not_found:
 static int read_partition(const char *part_name, const ulong load_addr)
 {
 	const qca_smem_flash_info_t *sfi = &qca_smem_flash_info;
+#ifdef CONFIG_QCA_MMC
 	block_dev_desc_t *mmc_dev;
 	disk_partition_t disk_info = {0};
 	ulong offset_blocks = 0, size_blocks = 0;
 	unsigned long long tmp_size_bytes;
+#endif
 	uint32_t offset_bytes = 0, size_bytes = 0;
     uint32_t flash_type;
     char buf[128];
@@ -739,11 +741,11 @@ static int read_partition(const char *part_name, const ulong load_addr)
             }
             break;
         }
+#ifdef CONFIG_QCA_MMC
 	case SMEM_BOOT_MMC_FLASH:
 	case SMEM_BOOT_NO_FLASH:
 	case SMEM_BOOT_SDC_FLASH:
-	default:
-        if (!has_mmc())
+		if (!has_mmc())
 			goto part_not_found;
 
 		mmc_dev = mmc_get_dev(mmc_host.dev_num);
@@ -769,7 +771,11 @@ static int read_partition(const char *part_name, const ulong load_addr)
 			size_bytes = (uint32_t)tmp_size_bytes;
 		}
 
-        sprintf(buf, "mmc read 0x%lx 0x%lx 0x%lx", load_addr, offset_blocks, size_blocks);
+		sprintf(buf, "mmc read 0x%lx 0x%lx 0x%lx", load_addr, offset_blocks, size_blocks);
+		break;
+#endif
+	default:
+		goto part_not_found;
 	}
 
 	if (!is_memory_region_available(load_addr, size_bytes))

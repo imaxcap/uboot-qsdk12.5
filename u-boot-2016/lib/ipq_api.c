@@ -24,9 +24,11 @@
 #include <ipq_api.h>
 #include <fdtdec.h>
 #include <dt-bindings/gpio/gpio.h>
+#ifdef CONFIG_QCA_MMC
 #include <part.h>
 #include <mmc.h>
 #include <sdhci.h>
+#endif
 #include <spi.h>
 #include <spi_flash.h>
 #include <linux/sizes.h>
@@ -38,10 +40,12 @@
 #include <mapmem.h>
 #include <flashrw.h>
 
+#ifdef CONFIG_QCA_MMC
 #ifndef CONFIG_SDHCI_SUPPORT
 extern qca_mmc mmc_host;
 #else
 extern struct sdhci_host mmc_host;
+#endif
 #endif
 
 DECLARE_GLOBAL_DATA_PTR;
@@ -295,7 +299,9 @@ void detect_flash_device(void)
 	int len = 0;
 	char flash_list[25];
 	struct spi_flash *spi;
+#ifdef CONFIG_QCA_MMC
 	block_dev_desc_t *mmc_dev;
+#endif
 	nand_info_t *nand;
 	detected_flash_device_t *dfd = &detected_flash_device;
 
@@ -316,11 +322,13 @@ void detect_flash_device(void)
 		dfd->nand = true;
 	}
 
+#ifdef CONFIG_QCA_MMC
 	mmc_dev = mmc_get_dev(mmc_host.dev_num);
 	if (mmc_dev && mmc_dev->type != DEV_TYPE_UNKNOWN) {
 		len += sprintf(flash_list + len, "%sMMC", len ? ", " : "");
 		dfd->mmc = true;
 	}
+#endif
 
 	flash_list[len] = '\0';
 
@@ -393,6 +401,7 @@ int string_to_flash_type(const char *str)
 // 9008 模式相关 (MIBIB 重载、默认 flash_type 设置)
 // =============================================================================
 
+#ifdef CONFIG_HTTPD
 typedef struct {
 	size_t read_size;
 	size_t flash_block_size;
@@ -582,6 +591,7 @@ void reload_mibib_from_flash_and_set_default_flash_type_in_9008_mode(void)
 	if (has_mmc() && !has_spi() && !has_nand())
 		sfi->flash_type = SMEM_BOOT_MMC_FLASH;
 }
+#endif
 
 // =============================================================================
 // 地址合法性检测（检测文件上传地址及内存区域是否可用）
@@ -734,6 +744,7 @@ done:
 
 bool mmc_part_exists(const char *part_name)
 {
+#ifdef CONFIG_QCA_MMC
 	int ret;
 	block_dev_desc_t *mmc_dev;
 	disk_partition_t disk_info = {0};
@@ -748,20 +759,25 @@ bool mmc_part_exists(const char *part_name)
 	ret = get_partition_info_efi_by_name(mmc_dev, part_name, &disk_info);
 
 	return ret ? false : true;
+#else
+	return false;
+#endif
 }
 
 void set_file_info_env(ulong file_addr, ulong file_size_bytes)
 {
 	setenv_hex("fileaddr", file_addr);
     setenv_hex("filesize", file_size_bytes);
-    if (has_mmc()) {
-        block_dev_desc_t *mmc_dev = mmc_get_dev(mmc_host.dev_num);
+#ifdef CONFIG_QCA_MMC
+	if (has_mmc()) {
+		block_dev_desc_t *mmc_dev = mmc_get_dev(mmc_host.dev_num);
         if (mmc_dev && mmc_dev->blksz) {
             setenv_hex("filesize_blks",
 				file_size_bytes / mmc_dev->blksz
 				+ (file_size_bytes % mmc_dev->blksz != 0));
-        }
-    }
+		}
+	}
+#endif
 }
 
 void print_progress_bar(ulong progress, ulong interval, const char *end_str)
